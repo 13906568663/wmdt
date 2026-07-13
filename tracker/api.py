@@ -32,7 +32,11 @@ def _suppress_drift(points: list[dict[str, Any]], anchor: dict[str, Any] | None)
             continue
         d = _dist_m(last, p)
         dt = max(p["server_ts"] - last["server_ts"], 0.001)
-        if d / dt > JUMP_SPEED_MPS:
+        implied_kmh = d / dt * 3.6
+        if implied_kmh > JUMP_SPEED_MPS * 3.6:
+            continue
+        # 位移隐含速度与设备上报车速严重不符 → 多路径甩点(静止时最典型),丢弃
+        if implied_kmh > max(3 * max(p["speed"], last["speed"]), 20.0):
             continue
         if d < STILL_DIST_M and p["speed"] < STILL_SPEED_KMH:
             continue
