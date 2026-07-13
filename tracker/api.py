@@ -9,10 +9,14 @@ from fastapi import APIRouter, HTTPException, Query
 
 from .storage import Storage
 
-# 漂移抑制阈值
-JUMP_SPEED_MPS = 42.0   # 隐含速度 >150km/h 视为坐标突跳,丢弃
-STILL_DIST_M = 20.0     # 位移小于 20 米
-STILL_SPEED_KMH = 3.0   # 且上报速度低于 3km/h → 视为静止漂移,不延伸轨迹
+# 漂移抑制参数。多路径漂移会同时伪造位移和 GPS 速度(实测静止设备报 5km/h),
+# 单点特征不可靠;改用"一段时间的净位移"判定运动状态:
+# 静止漂移是在原地打转,60 秒净位移拉不开;真实骑行/步行净位移远超阈值。
+JUMP_SPEED_KMH = 150.0   # 相邻点隐含速度上限,超过视为坐标突跳
+MOVE_WINDOW_S = 60.0     # 运动判定窗口
+MOVE_START_M = 50.0      # 窗口净位移超过 → 进入"移动中"
+MOVE_STOP_M = 25.0       # 低于 → 回到"静止"(迟滞防抖)
+MIN_SEG_M = 10.0         # 相邻轨迹顶点最小间距(消抖)
 
 
 def _dist_m(a: dict[str, Any], b: dict[str, Any]) -> float:
@@ -21,25 +25,52 @@ def _dist_m(a: dict[str, Any], b: dict[str, Any]) -> float:
     return 6371000 * 2 * asin(sqrt(h))
 
 
-def _suppress_drift(points: list[dict[str, Any]], anchor: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """静止漂移抑制 + 突跳点剔除。anchor 是增量拉取时客户端已画的最后一个点。"""
+def _mark_moving(seq: list[dict[str, Any]]) -> list[bool]:
+    """按 60 秒净位移 + 迟滞,给每个点标注"是否处于移动中"。"""
+    flags: list[bool] = []
+    state = False
+    j = 0
+    for i, p in enumerate(seq):
+        while j < i and seq[j]["server_ts"] < p["server_ts"] - MOVE_WINDOW_S:
+            j += 1
+        ref = seq[j - 1] if j > 0 else seq[0]
+        net = _dist_m(ref, p)
+        if net >= MOVE_START_M:
+            state = True
+        elif net <= MOVE_STOP_M:
+            state = False
+        flags.append(state)
+    return flags
+
+
+def _suppress_drift(
+    points: list[dict[str, Any]], context: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """context:窗口之前的原始点(增量拉取时用于运动状态判定与锚点),不计入返回。"""
+    seq = context + points
+    if not seq:
+        return []
+    flags = _mark_moving(seq)
     kept: list[dict[str, Any]] = []
-    last = anchor
-    for p in points:
-        if last is None:
-            kept.append(p)
-            last = p
+    last = context[-1] if context else None
+    rejects = 0
+    for i in range(len(context), len(seq)):
+        p = seq[i]
+        if not flags[i]:
             continue
-        d = _dist_m(last, p)
-        dt = max(p["server_ts"] - last["server_ts"], 0.001)
-        implied_kmh = d / dt * 3.6
-        if implied_kmh > JUMP_SPEED_MPS * 3.6:
-            continue
-        # 位移隐含速度与设备上报车速严重不符 → 多路径甩点(静止时最典型),丢弃
-        if implied_kmh > max(3 * max(p["speed"], last["speed"]), 20.0):
-            continue
-        if d < STILL_DIST_M and p["speed"] < STILL_SPEED_KMH:
-            continue
+        if last is not None:
+            d = _dist_m(last, p)
+            dt = max(p["server_ts"] - last["server_ts"], 0.001)
+            if d / dt * 3.6 > JUMP_SPEED_KMH:
+                rejects += 1
+                if rejects >= 3:
+                    # 连续多点稳定在远处:静默重锚,不画跨越连线
+                    last = p
+                    rejects = 0
+                continue
+            rejects = 0
+            if d < MIN_SEG_M:
+                continue
         kept.append(p)
         last = p
     return kept
@@ -77,8 +108,8 @@ def build_router(storage: Storage) -> APIRouter:
             only_located=not all,
         )
         if not all:
-            anchor = storage.point_by_id(device_id, since_id) if since_id else None
-            points = _suppress_drift(points, anchor)
+            context = storage.recent_located_before(device_id, since_id) if since_id else []
+            points = _suppress_drift(points, context)
         return {"device_id": device_id, "count": len(points), "points": points}
 
     return router

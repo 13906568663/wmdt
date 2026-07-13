@@ -150,13 +150,17 @@ class Storage:
             for r in rows
         ]
 
-    def point_by_id(self, device_id: str, point_id: int) -> dict[str, Any] | None:
+    def recent_located_before(
+        self, device_id: str, point_id: int, limit: int = 15
+    ) -> list[dict[str, Any]]:
+        """id <= point_id 的最近若干个有效定位点(升序),供增量查询做运动状态判定。"""
         with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM track_points WHERE device_id = ? AND id = ?",
-                (device_id, point_id),
-            ).fetchone()
-        return self._point_row(row) if row else None
+            rows = self._conn.execute(
+                "SELECT * FROM track_points WHERE device_id = ? AND located = 1 AND id <= ?"
+                " ORDER BY id DESC LIMIT ?",
+                (device_id, point_id, limit),
+            ).fetchall()
+        return [self._point_row(r) for r in reversed(rows)]
 
     def latest_point(self, device_id: str) -> dict[str, Any] | None:
         with self._lock:
