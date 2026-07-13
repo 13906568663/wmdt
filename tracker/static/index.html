@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>外卖平台 · 车辆轨迹监控</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-logo">轨迹</div>
+      <div>
+        <div class="brand-title">车辆轨迹监控</div>
+        <div class="brand-sub">JT808 接入 · 1秒/包 · 陀螺仪扩展</div>
+      </div>
+    </div>
+
+    <div class="section-title">设备列表 <span id="devCount" class="muted"></span></div>
+    <div id="deviceList" class="device-list">
+      <div class="empty">等待设备接入…<br/><span class="muted">TCP 端口见下方接入信息</span></div>
+    </div>
+
+    <div class="section-title">接入信息</div>
+    <div class="conn-info" id="connInfo">JT808 TCP 端口:加载中…</div>
+  </aside>
+
+  <main class="main">
+    <div id="map"></div>
+
+    <div class="panel mode-panel">
+      <div class="mode-tabs">
+        <button id="tabLive" class="active">实时跟踪</button>
+        <button id="tabHistory">历史轨迹</button>
+      </div>
+      <div id="liveBox">
+        <label class="checkbox"><input type="checkbox" id="followSwitch" checked /> 视角跟随车辆</label>
+      </div>
+      <div id="historyBox" style="display:none">
+        <input type="datetime-local" id="histStart" step="1" />
+        <input type="datetime-local" id="histEnd" step="1" />
+        <button class="btn" id="btnQuery">查询轨迹</button>
+      </div>
+      <div class="stats" id="trackStats"></div>
+    </div>
+
+    <div class="panel telemetry" id="telemetry" style="display:none">
+      <div class="tele-head">
+        <span id="teleDevice">--</span>
+        <span id="teleTime" class="muted">--</span>
+      </div>
+      <div class="tele-grid">
+        <div class="tele-item"><b id="tSpeed">0</b><span>车速 km/h</span></div>
+        <div class="tele-item"><b id="tDirection">0°</b><span>方向</span></div>
+        <div class="tele-item"><b id="tGyroX">-</b><span>陀螺仪X 侧翻</span></div>
+        <div class="tele-item"><b id="tGyroY">-</b><span>陀螺仪Y 俯仰</span></div>
+        <div class="tele-item"><b id="tGyroZ">-</b><span>陀螺仪Z 转向</span></div>
+        <div class="tele-item"><b id="tAccX">-</b><span>加速度X mG</span></div>
+        <div class="tele-item"><b id="tAccY">-</b><span>加速度Y mG</span></div>
+        <div class="tele-item"><b id="tAccZ">-</b><span>加速度Z mG</span></div>
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

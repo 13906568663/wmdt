@@ -1,0 +1,119 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 14px;
+  color: #26262b;
+  display: flex;
+}
+
+/* ── 侧栏 ─────────────────────────────── */
+.sidebar {
+  width: 292px;
+  flex-shrink: 0;
+  background: #fff;
+  border-right: 1px solid #eceef2;
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+  gap: 10px;
+  overflow-y: auto;
+}
+.brand { display: flex; gap: 10px; align-items: center; }
+.brand-logo {
+  background: linear-gradient(120deg, #ff5000, #ff9a4d);
+  color: #fff;
+  font-weight: 900;
+  padding: 9px 10px;
+  border-radius: 10px;
+  letter-spacing: 2px;
+}
+.brand-title { font-weight: 700; font-size: 16px; }
+.brand-sub { font-size: 11.5px; color: #999; margin-top: 2px; }
+.section-title { font-weight: 700; margin-top: 8px; font-size: 13px; }
+.muted { color: #a5a5ad; font-weight: 400; font-size: 12px; }
+
+.device-list { display: flex; flex-direction: column; gap: 8px; }
+.device-card {
+  border: 1px solid #eceef2;
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.device-card:hover { border-color: #ffb28a; }
+.device-card.active { border-color: #ff5000; box-shadow: 0 0 0 2px #ff500022; }
+.device-id { font-family: Consolas, monospace; font-weight: 700; }
+.device-meta { display: flex; gap: 10px; margin-top: 4px; font-size: 12px; color: #777; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+.dot.on { background: #22c55e; }
+.dot.off { background: #c3c3cb; }
+.empty { color: #999; text-align: center; padding: 26px 0; line-height: 1.9; border: 1px dashed #e2e4ea; border-radius: 10px; }
+.conn-info {
+  background: #f7f8fa;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.9;
+  color: #555;
+  font-family: Consolas, monospace;
+  white-space: pre-line;
+}
+
+/* ── 地图区 ───────────────────────────── */
+.main { flex: 1; position: relative; }
+#map { width: 100%; height: 100%; }
+
+.panel {
+  position: absolute;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 4px 18px rgba(20, 24, 40, 0.14);
+  padding: 12px 14px;
+  z-index: 9;
+}
+.mode-panel { top: 14px; right: 14px; width: 280px; display: flex; flex-direction: column; gap: 10px; }
+.mode-tabs { display: flex; background: #f2f3f6; border-radius: 9px; padding: 3px; }
+.mode-tabs button {
+  flex: 1;
+  border: none;
+  background: transparent;
+  padding: 7px 0;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #666;
+}
+.mode-tabs button.active { background: #ff5000; color: #fff; font-weight: 700; }
+.checkbox { display: flex; gap: 6px; align-items: center; color: #555; font-size: 13px; }
+#historyBox { display: flex; flex-direction: column; gap: 8px; }
+#historyBox input {
+  border: 1px solid #dfe1e7;
+  border-radius: 8px;
+  padding: 7px 8px;
+  font-size: 13px;
+}
+.btn {
+  border: none;
+  background: #ff5000;
+  color: #fff;
+  border-radius: 8px;
+  padding: 8px 0;
+  cursor: pointer;
+  font-weight: 700;
+}
+.btn:hover { background: #e64800; }
+.stats { font-size: 12px; color: #888; line-height: 1.8; }
+
+/* ── 遥测面板 ─────────────────────────── */
+.telemetry { left: 14px; bottom: 20px; width: 380px; }
+.tele-head { display: flex; justify-content: space-between; margin-bottom: 8px; font-weight: 700; font-family: Consolas, monospace; }
+.tele-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.tele-item {
+  background: #f7f8fa;
+  border-radius: 9px;
+  text-align: center;
+  padding: 8px 2px;
+}
+.tele-item b { display: block; font-size: 15px; color: #ff5000; font-family: Consolas, monospace; }
+.tele-item span { font-size: 10.5px; color: #999; }
