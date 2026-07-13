@@ -165,9 +165,12 @@ class Storage:
         start: str | None = None,
         end: str | None = None,
         limit: int = 5000,
+        only_located: bool = False,
     ) -> list[dict[str, Any]]:
         sql = "SELECT * FROM track_points WHERE device_id = ?"
         args: list[Any] = [device_id]
+        if only_located:
+            sql += " AND located = 1"
         if since_id:
             sql += " AND id > ?"
             args.append(since_id)

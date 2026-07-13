@@ -28,8 +28,16 @@ def build_router(storage: Storage) -> APIRouter:
         start: str | None = Query(default=None, description="开始时间 YYYY-MM-DD HH:MM:SS"),
         end: str | None = Query(default=None, description="结束时间"),
         limit: int = Query(default=5000, ge=1, le=50000),
+        all: int = Query(default=0, description="1=包含未定位的点(默认只返回定位有效的点)"),
     ):
-        points = storage.track(device_id, since_id=since_id, start=start, end=end, limit=limit)
+        points = storage.track(
+            device_id,
+            since_id=since_id,
+            start=start,
+            end=end,
+            limit=limit,
+            only_located=not all,
+        )
         return {"device_id": device_id, "count": len(points), "points": points}
 
     return router
