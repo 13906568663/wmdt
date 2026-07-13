@@ -67,17 +67,31 @@ uv run python scripts/mqtt_simulator.py --host <服务器IP> --device 9831040154
 | 9~10 | Y 轴加速度(前后惯性,急刹车) |
 | 11~12 | Z 轴加速度(垂直受力,静止约 1000mG) |
 
-## 部署到服务器(docker)
+## 部署到服务器(docker,两类硬件独立两套)
+
+JT808 与 MQTT **各跑一个实例**:独立端口、独立数据库、独立页面,互不可见。
 
 ```bash
 docker build -t waimai-tracker .
-docker run -d --name waimai-tracker --restart unless-stopped \
-  -p 18209:18209 -p 18808:18808 -p 18883:18883 \
-  -v waimai_tracker_data:/app/data waimai-tracker
+
+# 实例一:JT808(页面 18209,接入 18808)
+docker run -d --name wmdt --restart unless-stopped \
+  -e TRACKER_ENABLE_MQTT=0 \
+  -p 18209:18209 -p 18808:18808 \
+  -v wmdt_data:/app/data waimai-tracker
+
+# 实例二:MQTT(页面 18309,接入 18883)
+docker run -d --name wmdt-mqtt --restart unless-stopped \
+  -e TRACKER_ENABLE_JT808=0 \
+  -p 18309:18209 -p 18883:18883 \
+  -v wmdt_mqtt_data:/app/data waimai-tracker
 ```
 
-JT808 硬件配 `服务器IP:18808`(TCP),MQTT 硬件配 `服务器IP:18883`,
-打开 `http://服务器IP:18209/` 即可看轨迹。
+| 实例 | 硬件接入 | 轨迹页面 |
+|---|---|---|
+| JT808 | `服务器IP:18808`(TCP) | `http://服务器IP:18209/` |
+| MQTT | `服务器IP:18883`(TCP) | `http://服务器IP:18309/` |
+
 设备接入细节见 `docs/设备接入文档.md`(JT808)与 `docs/MQTT设备接入文档.md`。
 
 ## 目录结构

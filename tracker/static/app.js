@@ -22,8 +22,10 @@ async function api(path) {
 
 (async function boot() {
   const cfg = await api("/config");
-  $("#connInfo").textContent =
-    `JT808 接入: TCP ${cfg.tcp_port}(2013/2019,0xF1 陀螺仪)\nMQTT 接入: TCP ${cfg.mqtt_port}(JSON,按 devId 识别)`;
+  const lines = [];
+  if (cfg.tcp_port) lines.push(`JT808 接入: TCP ${cfg.tcp_port}(2013/2019,0xF1 陀螺仪)`);
+  if (cfg.mqtt_port) lines.push(`MQTT 接入: TCP ${cfg.mqtt_port}(JSON,按 devId 识别)`);
+  $("#connInfo").textContent = lines.join("\n");
   window.__initMap = initMap;
   const script = document.createElement("script");
   script.src = `https://api.map.baidu.com/api?type=webgl&v=1.0&ak=${cfg.baidu_ak}&callback=__initMap`;

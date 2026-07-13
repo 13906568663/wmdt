@@ -1,9 +1,12 @@
 """外卖平台·车辆轨迹服务入口。
 
-一个进程带起三个端口:
-- TCP  18808:JT808 硬件接入(1 秒 1 包位置汇报,含 0xF1 陀螺仪扩展)
-- TCP  18883:MQTT 硬件接入(JSON 上报,含雷达/刹车/陀螺仪字段)
+一个进程带起:
 - HTTP 18209:百度地图轨迹页面 + REST API
+- TCP  18808:JT808 硬件接入(TRACKER_ENABLE_JT808=0 关闭)
+- TCP  18883:MQTT 硬件接入(TRACKER_ENABLE_MQTT=0 关闭)
+
+两类硬件需要完全隔离部署时,用开关各起一个实例(独立端口+独立数据目录),
+见 README「部署到服务器」。
 
 启动:cd 外卖平台目录 && uv sync && uv run python main.py
 """
@@ -32,22 +35,28 @@ WEB_PORT = int(os.getenv("TRACKER_WEB_PORT", "18209"))
 TCP_HOST = os.getenv("TRACKER_TCP_HOST", "0.0.0.0")
 TCP_PORT = int(os.getenv("TRACKER_TCP_PORT", "18808"))
 MQTT_PORT = int(os.getenv("TRACKER_MQTT_PORT", "18883"))
+ENABLE_JT808 = os.getenv("TRACKER_ENABLE_JT808", "1") == "1"
+ENABLE_MQTT = os.getenv("TRACKER_ENABLE_MQTT", "1") == "1"
 BAIDU_AK = os.getenv("BAIDU_MAP_AK", "mS6xcVAJ12xyvGDiJiTH0dxVHnoWFeYf")
 
 STATIC_DIR = Path(__file__).parent / "tracker" / "static"
 
 storage = Storage()
-tcp_server = JT808Server(storage, host=TCP_HOST, port=TCP_PORT)
-mqtt_server = MQTTServer(storage, host=TCP_HOST, port=MQTT_PORT)
+tcp_server = JT808Server(storage, host=TCP_HOST, port=TCP_PORT) if ENABLE_JT808 else None
+mqtt_server = MQTTServer(storage, host=TCP_HOST, port=MQTT_PORT) if ENABLE_MQTT else None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await tcp_server.start()
-    await mqtt_server.start()
+    if tcp_server:
+        await tcp_server.start()
+    if mqtt_server:
+        await mqtt_server.start()
     yield
-    await mqtt_server.stop()
-    await tcp_server.stop()
+    if mqtt_server:
+        await mqtt_server.stop()
+    if tcp_server:
+        await tcp_server.stop()
 
 
 app = FastAPI(title="外卖平台·车辆轨迹服务", lifespan=lifespan)
@@ -57,7 +66,11 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/api/config")
 def get_config():
-    return {"baidu_ak": BAIDU_AK, "tcp_port": TCP_PORT, "mqtt_port": MQTT_PORT}
+    return {
+        "baidu_ak": BAIDU_AK,
+        "tcp_port": TCP_PORT if ENABLE_JT808 else None,
+        "mqtt_port": MQTT_PORT if ENABLE_MQTT else None,
+    }
 
 
 @app.get("/", include_in_schema=False)
