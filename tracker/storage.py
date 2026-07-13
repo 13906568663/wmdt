@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS devices (
     registered_at REAL,
     last_seen   REAL,
     auth_code   TEXT DEFAULT '',
-    plate       TEXT DEFAULT ''
+    plate       TEXT DEFAULT '',
+    protocol    TEXT DEFAULT 'jt808'
 );
 CREATE TABLE IF NOT EXISTS track_points (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,23 +51,34 @@ class Storage:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        try:  # 旧库升级
+            self._conn.execute("ALTER TABLE devices ADD COLUMN protocol TEXT DEFAULT 'jt808'")
+        except sqlite3.OperationalError:
+            pass
         self._lock = threading.Lock()
 
     # ── 设备 ───────────────────────────────────────────
 
-    def upsert_device(self, device_id: str, auth_code: str | None = None, plate: str | None = None) -> None:
+    def upsert_device(
+        self,
+        device_id: str,
+        auth_code: str | None = None,
+        plate: str | None = None,
+        protocol: str | None = None,
+    ) -> None:
         now = time.time()
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO devices(device_id, registered_at, last_seen, auth_code, plate)
-                VALUES(?, ?, ?, COALESCE(?, ''), COALESCE(?, ''))
+                INSERT INTO devices(device_id, registered_at, last_seen, auth_code, plate, protocol)
+                VALUES(?, ?, ?, COALESCE(?, ''), COALESCE(?, ''), COALESCE(?, 'jt808'))
                 ON CONFLICT(device_id) DO UPDATE SET
                     last_seen = excluded.last_seen,
                     auth_code = COALESCE(?, devices.auth_code),
-                    plate = COALESCE(?, devices.plate)
+                    plate = COALESCE(?, devices.plate),
+                    protocol = COALESCE(?, devices.protocol)
                 """,
-                (device_id, now, now, auth_code, plate, auth_code, plate),
+                (device_id, now, now, auth_code, plate, protocol, auth_code, plate, protocol),
             )
             self._conn.commit()
 
@@ -131,7 +143,7 @@ class Storage:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT d.device_id, d.last_seen, d.plate,
+                SELECT d.device_id, d.last_seen, d.plate, d.protocol,
                        p.lat_bd, p.lon_bd, p.speed, p.direction, p.gps_time,
                        (SELECT COUNT(*) FROM track_points t WHERE t.device_id = d.device_id) AS point_count
                 FROM devices d

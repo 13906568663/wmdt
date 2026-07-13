@@ -12,6 +12,6 @@ COPY main.py ./
 COPY tracker/ tracker/
 COPY scripts/ scripts/
 
-EXPOSE 18209 18808
+EXPOSE 18209 18808 18883
 
 CMD ["python", "main.py"]

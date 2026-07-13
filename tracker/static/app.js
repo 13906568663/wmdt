@@ -23,7 +23,7 @@ async function api(path) {
 (async function boot() {
   const cfg = await api("/config");
   $("#connInfo").textContent =
-    `协议: JT/T 808 (2013/2019)\nTCP 端口: ${cfg.tcp_port}\n上报频率: 1 秒/包\n陀螺仪扩展: 附加信息 0xF1`;
+    `JT808 接入: TCP ${cfg.tcp_port}(2013/2019,0xF1 陀螺仪)\nMQTT 接入: TCP ${cfg.mqtt_port}(JSON,按 devId 识别)`;
   window.__initMap = initMap;
   const script = document.createElement("script");
   script.src = `https://api.map.baidu.com/api?type=webgl&v=1.0&ak=${cfg.baidu_ak}&callback=__initMap`;
@@ -61,8 +61,10 @@ async function refreshDevices() {
     .map((d) => {
       const active = d.device_id === currentDevice ? " active" : "";
       const time = d.gps_time ? d.gps_time.slice(5) : "无轨迹";
+      const proto = (d.protocol || "jt808").toUpperCase();
       return `<div class="device-card${active}" onclick="selectDevice('${d.device_id}')">
-        <div class="device-id"><span class="dot ${d.online ? "on" : "off"}"></span>${d.device_id}</div>
+        <div class="device-id"><span class="dot ${d.online ? "on" : "off"}"></span>${d.device_id}
+          <span class="proto-tag">${proto}</span></div>
         <div class="device-meta">
           <span>${d.speed != null ? d.speed + " km/h" : "-"}</span>
           <span>${time}</span>
