@@ -132,7 +132,7 @@ function appendPoints(points, { fit = false } = {}) {
 
 function updateTelemetry(p) {
   $("#telemetry").style.display = "block";
-  $("#teleTime").textContent = p.gps_time;
+  $("#teleTime").textContent = p.gps_time + (p.located ? "" : " (未定位)");
   $("#tSpeed").textContent = p.speed;
   $("#tDirection").textContent = p.direction + "°";
   const fmt = (v) => (v == null ? "-" : v);
@@ -163,6 +163,14 @@ async function startLive() {
     try {
       const data = await api(`/devices/${currentDevice}/track?since_id=${lastPointId}`);
       appendPoints(data.points);
+      // 轨迹线只画有效移动;但遥测和车标要跟最新上报走(静止/漂移时轨迹不动,数据照样刷新)
+      if (!data.points.length) {
+        const latest = await api(`/devices/${currentDevice}/latest`);
+        updateTelemetry(latest);
+        if (latest.located && marker) {
+          marker.setPosition(new BMapGL.Point(latest.lon_bd, latest.lat_bd));
+        }
+      }
     } catch (e) { /* 网络抖动,下轮再试 */ }
   }, 1000);
 }
