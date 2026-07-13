@@ -7,7 +7,8 @@ import logging
 
 from . import jt808
 from .geo import wgs84_to_bd09
-from .storage import Storage
+from .rawlog import RawLogger
+from .storage import DB_DIR, Storage
 
 logger = logging.getLogger("jt808.server")
 
@@ -19,6 +20,7 @@ class JT808Server:
         self.port = port
         self._serial = 0
         self._server: asyncio.AbstractServer | None = None
+        self._rawlog = RawLogger(DB_DIR / "raw")
 
     def _next_serial(self) -> int:
         self._serial = (self._serial + 1) & 0xFFFF
@@ -32,9 +34,11 @@ class JT808Server:
         if self._server:
             self._server.close()
             await self._server.wait_closed()
+        self._rawlog.close()
 
     async def _handle_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        peer = writer.get_extra_info("peername")
+        peername = writer.get_extra_info("peername")
+        peer = f"{peername[0]}:{peername[1]}" if peername else "?"
         buffer = bytearray()
         device_id = ""
         logger.info("新连接 %s", peer)
@@ -45,6 +49,7 @@ class JT808Server:
                     break
                 buffer += chunk
                 for segment in jt808.split_frames(buffer):
+                    self._rawlog.log("RX", peer, device_id, b"\x7e" + segment + b"\x7e")
                     try:
                         msg = jt808.parse_frame(segment)
                     except jt808.FrameError as e:
@@ -53,6 +58,7 @@ class JT808Server:
                     device_id = msg.phone
                     reply = self._dispatch(msg)
                     if reply:
+                        self._rawlog.log("TX", peer, device_id, reply)
                         writer.write(reply)
                         await writer.drain()
         except (ConnectionResetError, asyncio.IncompleteReadError):

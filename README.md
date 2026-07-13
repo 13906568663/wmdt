@@ -25,6 +25,7 @@ uv run python main.py
 - 地图页面:http://127.0.0.1:18209/
 - JT808 接入:TCP `18808` 端口(硬件把服务器地址配到这里)
 - 数据落在 `data/tracker.db`(SQLite,删掉即清空)
+- 原始报文按天落在 `data/raw/jt808-YYYYMMDD.log`(RX/TX 每帧 hex 原文,排查协议问题用)
 
 另开一个终端跑模拟器:
 
