@@ -150,6 +150,14 @@ class Storage:
             for r in rows
         ]
 
+    def point_by_id(self, device_id: str, point_id: int) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM track_points WHERE device_id = ? AND id = ?",
+                (device_id, point_id),
+            ).fetchone()
+        return self._point_row(row) if row else None
+
     def latest_point(self, device_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
