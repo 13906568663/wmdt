@@ -270,7 +270,7 @@ class Storage:
         end: str | None = None,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM events WHERE device_id = ?"
+        sql = "SELECT * FROM events WHERE device_id = ? AND type != 'void'"
         args: list[Any] = [device_id]
         if since_id:
             sql += " AND id > ?"

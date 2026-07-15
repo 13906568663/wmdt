@@ -45,6 +45,7 @@ DROP_MEMORY_S = 12.0                # "速度突然归零"记忆窗口
 STOP_DROP_KMH = 3.0                 # 速度突降判定:近窗内曾 ≥ 此值而当前静止
 DIR_DELTA_G = 0.30                  # 方向分量阈值(g)
 AXIS_LABELS = {"x+": "左", "x-": "右", "y+": "后", "y-": "前", "z+": "翻正", "z-": "翻覆"}
+REMOUNT_RIDE_S = 15.0               # 倾斜状态持续骑行超过此时长 → 判为安装方向变化,作废摔车并重新标定
 
 # ── 急刹 ──
 BRAKE_DV_KMH = -10.0
@@ -81,6 +82,7 @@ def _angle_deg(a: tuple[float, float, float], b: tuple[float, float, float]) -> 
 class _DevState:
     def __init__(self) -> None:
         self.last_t = 0.0
+        self.dt = 0.0
         self.last_pos: tuple[float, float] | None = None  # (lon_bd, lat_bd)
         # 标定
         self.cal_buf: list[tuple[tuple[float, ...], tuple[float, ...]]] = []
@@ -100,6 +102,7 @@ class _DevState:
         self.fall_confirmed = False
         self.recover = 0
         self.last_fall_t = 0.0
+        self.tilt_ride_s = 0.0      # 倾斜状态下累计骑行时长(识别重新安装)
         # 急刹
         self.prev_v: tuple[float, float] | None = None  # (t, v)
         self.last_brake_t = 0.0
@@ -136,6 +139,7 @@ class EventDetector:
         t = self._parse_time(point.get("gps_time") or "")
         if t <= st.last_t:  # 重复/乱序包
             return
+        st.dt = t - st.last_t if st.last_t else 0.0
         st.last_t = t
         v = float(point.get("speed") or 0)
         if point.get("located") and lon_bd and lat_bd:
@@ -232,6 +236,20 @@ class EventDetector:
             speed_drop = v < STOP_V_KMH and any(vv >= STOP_DROP_KMH for _, vv in st.speeds[:-1])
             suspect = st.run_mid >= CONFIRM_N and (spike_recent or speed_drop)
 
+            # 倾斜状态下仍持续骑行 → 不是摔倒,是设备被换了安装方向:
+            # 作废本次摔车,清基准触发重新标定(下一段静止自动完成)
+            st.tilt_ride_s = st.tilt_ride_s + st.dt if v >= GO_V_KMH else 0.0
+            if st.tilt_ride_s >= REMOUNT_RIDE_S:
+                if st.fall_id is not None:
+                    self.storage.update_event(st.fall_id, etype="void",
+                                              detail={"reason": "倾斜状态持续骑行,判为安装方向变化"})
+                logger.info("检测到安装方向变化 device=%s,重新标定", device_id)
+                self._reset_fall(st)
+                st.ref = None
+                st.accel_idx = None
+                st.cal_buf = []
+                return
+
             if st.fall_id is None and (confirmed or suspect):
                 etype = "fall" if confirmed else "fall_suspect"
                 st.fall_id = self._insert(device_id, etype, st.run_start, None, st, t)
@@ -284,6 +302,7 @@ class EventDetector:
     def _reset_fall(self, st: _DevState) -> None:
         st.run_mid = st.run_high = st.recover = 0
         st.run_start = ""
+        st.tilt_ride_s = 0.0
         st.steady = None
         st.tilt_max = st.gyro_peak = 0.0
         st.fall_id = None
