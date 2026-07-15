@@ -240,6 +240,23 @@ class Storage:
             self._conn.commit()
             return int(cur.lastrowid or 0)
 
+    def close_dangling_events(self, device_id: str) -> None:
+        """进程重启后闭合遗留的未结束事件(状态机只在内存,重启即孤儿)。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, detail FROM events WHERE device_id = ? AND end_time IS NULL",
+                (device_id,),
+            ).fetchall()
+            for r in rows:
+                detail = json.loads(r["detail"] or "{}")
+                detail["interrupted"] = 1
+                self._conn.execute(
+                    "UPDATE events SET end_time = start_time, detail = ? WHERE id = ?",
+                    (json.dumps(detail, ensure_ascii=False), r["id"]),
+                )
+            if rows:
+                self._conn.commit()
+
     def update_event(self, event_id: int, etype: str | None = None,
                      end_time: str | None = None,
                      detail: dict[str, Any] | None = None) -> None:
@@ -270,7 +287,8 @@ class Storage:
         end: str | None = None,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM events WHERE device_id = ? AND type != 'void'"
+        # void=换装仲裁作废;stop_short=历史遗留的短停(现已不再生成,一并隐藏)
+        sql = "SELECT * FROM events WHERE device_id = ? AND type NOT IN ('void', 'stop_short')"
         args: list[Any] = [device_id]
         if since_id:
             sql += " AND id > ?"

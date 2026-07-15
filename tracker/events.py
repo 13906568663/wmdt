@@ -1,4 +1,4 @@
-"""事件规则引擎:摔车(含方向)/疑似摔车/急刹/颠簸/停驻。
+"""事件规则引擎:摔车(含方向)/疑似摔车/急刹/颠簸/长停驻。
 
 阈值来源与回代验证见 docs/事件规则分析_20260715夜测.md。设计要点:
 
@@ -31,11 +31,20 @@ logger = logging.getLogger("events")
 GRAVITY_SCALES = (16384.0, 1000.0)  # 1g 候选刻度:原始 LSB(±2g 量程)/ mG
 SCALE_TOLERANCE = 0.5               # |log(模长/刻度)| 容差(约 ±65%)
 CAL_SAMPLES = 12                    # 连续静止标定样本数(滑窗)
-CAL_MAX_SPREAD_DEG = 15.0           # 标定样本与中位矢量最大夹角
+CAL_MAX_SPREAD_DEG = 15.0           # 静止标定样本与基准最大夹角
+CAL_KEEP_RATIO = 0.7                # 剔除离群样本后至少保留比例
 REF_UPDATE_TILT = 25.0              # 已有基准时仅在近直立状态缓慢更新
+# 骑行标定:骑行中车必然直立,用平稳骑行段刷新直立基准。
+# 换装/静止标定误锁(设备被手持摆放)后无需长时间静止即可恢复检测。
+RIDE_CAL_V_KMH = 5.0
+RIDE_CAL_MIN_N = 4                  # 最少样本数
+RIDE_CAL_SPAN_S = 15.0              # 样本须覆盖的最短时间跨度(兼容 1s/5s 上报)
+RIDE_CAL_MAX_N = 12
+RIDE_CAL_WINDOW_S = 60.0
+RIDE_CAL_SPREAD_DEG = 25.0          # 骑行样本含转弯/颠簸,容差放宽
 
 # ── 摔车 ──
-FALL_TILT = 70.0                    # 确定摔倒倾角
+FALL_TILT = 65.0                    # 确定摔倒倾角(0716 右前方摔车 67° 回代下调)
 MID_TILT = 45.0                     # 疑似摔倒倾角下限
 RECOVER_TILT = 40.0                 # 恢复倾角
 CONFIRM_N = 2                       # 连续包数(确认/恢复)
@@ -52,6 +61,12 @@ BRAKE_DV_KMH = -10.0
 BRAKE_MAX_GAP_S = 8.0
 BRAKE_END_KMH = 5.0
 BRAKE_COOLDOWN_S = 20.0
+# 陀螺辅助急刹:低速急刹 GPS 速度差不够(采样稀释),但刹车点头在陀螺上有尖峰。
+# 条件:当前静止 + 近12s内最高速≥阈值(过滤蠕行进红灯/起步顿挫) + 近窗陀螺尖峰。
+# 阈值由 0715/0716 两晚全部骤停点回代标定。
+BRAKE_ASSIST_V_KMH = 7.5
+BRAKE_ASSIST_GYRO_S = 8.0
+BRAKE_ASSIST_GYRO = {16384.0: 1000.0, 1000.0: 60.0}  # 按加速度刻度配套的陀螺阈值
 
 # ── 颠簸 ──
 BUMP_WINDOW_S = 75.0
@@ -63,8 +78,7 @@ BUMP_MERGE_GAP_S = 90.0
 # ── 停驻 ──
 STOP_V_KMH = 2.0                    # 低于视为静止
 GO_V_KMH = 4.0                      # 高于视为恢复移动(迟滞)
-STOP_MIN_S = 30.0                   # 最短停驻
-PARK_MIN_S = 300.0                  # 超过归为长驻(等餐/驻车)
+PARK_MIN_S = 300.0                  # 仅记录 ≥5 分钟的长停驻(等餐/驻车),红绿灯等短停不入库
 
 
 def _mag(v: tuple[float, float, float]) -> float:
@@ -85,7 +99,8 @@ class _DevState:
         self.dt = 0.0
         self.last_pos: tuple[float, float] | None = None  # (lon_bd, lat_bd)
         # 标定
-        self.cal_buf: list[tuple[tuple[float, ...], tuple[float, ...]]] = []
+        self.cal_buf: list[tuple[float, ...]] = []
+        self.ride_buf: list[tuple[float, tuple[float, ...]]] = []  # (t, 六轴) 骑行样本
         self.accel_idx: int | None = None   # 哪组是加速度计:0=前六字节组 1=后六字节组
         self.scale = 0.0
         self.ref: tuple[float, float, float] | None = None  # 直立基准(g)
@@ -135,6 +150,9 @@ class EventDetector:
 
     def _process(self, device_id: str, point: dict[str, Any],
                  lon_bd: float | None, lat_bd: float | None) -> None:
+        if device_id not in self._states:
+            # 进程重启后内存状态丢失,先闭合库里遗留的未结束事件,避免永远"进行中"
+            self.storage.close_dangling_events(device_id)
         st = self._states.setdefault(device_id, _DevState())
         t = self._parse_time(point.get("gps_time") or "")
         if t <= st.last_t:  # 重复/乱序包
@@ -151,7 +169,7 @@ class EventDetector:
         a_g: tuple[float, float, float] | None = None
         gmag: float | None = None
         if triplets:
-            self._calibrate(st, triplets, v)
+            self._calibrate(st, triplets, v, t)
             if st.accel_idx is not None:
                 acc_raw = triplets[st.accel_idx]
                 a_g = (acc_raw[0] / st.scale, acc_raw[1] / st.scale, acc_raw[2] / st.scale)
@@ -160,18 +178,24 @@ class EventDetector:
                 st.spikes = [x for x in st.spikes if t - x[0] <= SPIKE_MEMORY_S]
 
         gps_time = point.get("gps_time") or ""
+        tilt: float | None = None
         if a_g is not None and st.ref is not None:
+            tilt = _angle_deg(a_g, st.ref)
             self._fall_rule(device_id, st, t, gps_time, v, a_g, gmag or 0.0)
             self._bump_rule(device_id, st, t, gps_time, v, a_g)
-        self._brake_rule(device_id, st, t, gps_time, v)
+        self._brake_rule(device_id, st, t, gps_time, v, tilt)
         self._stop_rule(device_id, st, t, gps_time, v)
         st.prev_v = (t, v)
 
     # ── 标定 ───────────────────────────────────────────
 
-    def _calibrate(self, st: _DevState, triplets: list[tuple[float, ...]], v: float) -> None:
-        if v >= STOP_V_KMH:  # 只用"连续静止段"的样本
+    def _calibrate(self, st: _DevState, triplets: list[tuple[float, ...]],
+                   v: float, t: float) -> None:
+        six = tuple(triplets[0]) + tuple(triplets[1])
+        if v >= STOP_V_KMH:
             st.cal_buf = []
+            if v >= RIDE_CAL_V_KMH:
+                self._ride_cal(st, six, t)
             return
         if st.ref is not None and st.accel_idx is not None:
             # 已标定:仅近直立时缓慢跟随(防止倒地/搬动把基准带偏)
@@ -180,13 +204,27 @@ class EventDetector:
             if _angle_deg(a_g, st.ref) >= REF_UPDATE_TILT:
                 st.cal_buf = []
                 return
-        st.cal_buf.append(tuple(triplets[0]) + tuple(triplets[1]))  # type: ignore[arg-type]
+        st.cal_buf.append(six)
         if len(st.cal_buf) >= CAL_SAMPLES:
-            self._finish_cal(st, st.cal_buf[-CAL_SAMPLES:])
+            self._finish_cal(st, st.cal_buf[-CAL_SAMPLES:], CAL_MAX_SPREAD_DEG, "静止")
             # 滑动窗口:无论成败保留最近样本,下一包继续尝试
             st.cal_buf = st.cal_buf[-(CAL_SAMPLES - 1):]
 
-    def _finish_cal(self, st: _DevState, samples: list[tuple[float, ...]]) -> None:
+    def _ride_cal(self, st: _DevState, six: tuple[float, ...], t: float) -> None:
+        """骑行标定:骑行=直立,平稳骑行段的重力中位矢量就是直立基准。"""
+        st.ride_buf.append((t, six))
+        st.ride_buf = [x for x in st.ride_buf if t - x[0] <= RIDE_CAL_WINDOW_S][-RIDE_CAL_MAX_N:]
+        if (len(st.ride_buf) < RIDE_CAL_MIN_N
+                or t - st.ride_buf[0][0] < RIDE_CAL_SPAN_S):
+            return
+        # 摔车状态机活跃时禁止刷新(倾斜骑行=换装场景,交由 void 仲裁清基准后立即恢复)
+        if st.ref is not None and (st.fall_id is not None or st.run_mid > 0):
+            return
+        if self._finish_cal(st, [s for _, s in st.ride_buf], RIDE_CAL_SPREAD_DEG, "骑行"):
+            st.ride_buf = []
+
+    def _finish_cal(self, st: _DevState, samples: list[tuple[float, ...]],
+                    spread_deg: float, source: str) -> bool:
         med = [statistics.median(s[i] for s in samples) for i in range(6)]
         cands = [tuple(med[0:3]), tuple(med[3:6])]
         best: tuple[float, int, float] | None = None  # (score, idx, scale)
@@ -199,19 +237,23 @@ class EventDetector:
                 if best is None or score < best[0]:
                     best = (score, idx, scale)
         if best is None or best[0] > SCALE_TOLERANCE:
-            return
+            return False
         _, idx, scale = best
         ref = tuple(x / scale for x in cands[idx])
-        # 样本稳定性检查:与中位矢量夹角过大说明标定期间在动/被搬
-        for s in samples:
-            a = (s[idx * 3] / scale, s[idx * 3 + 1] / scale, s[idx * 3 + 2] / scale)
-            if _angle_deg(a, ref) > CAL_MAX_SPREAD_DEG:  # type: ignore[arg-type]
-                return
+        # 剔除离群样本(转弯/颠簸/瞬时扰动),保留量不足说明姿态不稳,放弃本窗
+        kept = [s for s in samples
+                if _angle_deg((s[idx * 3] / scale, s[idx * 3 + 1] / scale,
+                               s[idx * 3 + 2] / scale), ref) <= spread_deg]  # type: ignore[arg-type]
+        if len(kept) < max(4, int(len(samples) * CAL_KEEP_RATIO)):
+            return False
+        med2 = [statistics.median(s[i] for s in kept) for i in range(6)]
+        ref = tuple(med2[idx * 3 + j] / scale for j in range(3))
         changed = st.accel_idx != idx or st.ref is None
         st.accel_idx, st.scale, st.ref = idx, scale, ref  # type: ignore[assignment]
         if changed:
-            logger.info("六轴标定完成: 加速度计=第%s组 刻度=%s/g 基准=%s",
-                        idx + 1, int(scale), tuple(round(x, 2) for x in ref))
+            logger.info("六轴标定完成(%s): 加速度计=第%s组 刻度=%s/g 基准=%s",
+                        source, idx + 1, int(scale), tuple(round(x, 2) for x in ref))
+        return True
 
     # ── 摔车 ───────────────────────────────────────────
 
@@ -241,10 +283,11 @@ class EventDetector:
             st.tilt_ride_s = st.tilt_ride_s + st.dt if v >= GO_V_KMH else 0.0
             if st.tilt_ride_s >= REMOUNT_RIDE_S:
                 if st.fall_id is not None:
-                    self.storage.update_event(st.fall_id, etype="void",
+                    self.storage.update_event(st.fall_id, etype="void", end_time=gps_time,
                                               detail={"reason": "倾斜状态持续骑行,判为安装方向变化"})
                 logger.info("检测到安装方向变化 device=%s,重新标定", device_id)
                 self._reset_fall(st)
+                # 清基准触发重标定;骑行缓冲保留,下一包即可用新姿态恢复
                 st.ref = None
                 st.accel_idx = None
                 st.cal_buf = []
@@ -310,7 +353,8 @@ class EventDetector:
 
     # ── 急刹 ───────────────────────────────────────────
 
-    def _brake_rule(self, device_id: str, st: _DevState, t: float, gps_time: str, v: float) -> None:
+    def _brake_rule(self, device_id: str, st: _DevState, t: float, gps_time: str,
+                    v: float, tilt: float | None) -> None:
         prev = st.prev_v
         if prev is None:
             return
@@ -318,14 +362,27 @@ class EventDetector:
         dt = t - pt
         if dt <= 0 or dt > BRAKE_MAX_GAP_S:
             return
-        dv = v - pv
         fall_recent = st.fall_id is not None or (t - st.last_fall_t) < 10
-        if (dv <= BRAKE_DV_KMH and v < BRAKE_END_KMH and not fall_recent
-                and t - st.last_brake_t > BRAKE_COOLDOWN_S):
+        if fall_recent or t - st.last_brake_t <= BRAKE_COOLDOWN_S:
+            return
+        dv = v - pv
+        strong = dv <= BRAKE_DV_KMH and v < BRAKE_END_KMH
+        # 陀螺辅助:低速急刹 GPS 速度差常不足 10 km/h,用"骤停+刹车点头尖峰"补判。
+        # 姿态须直立(排除摔倒骤停),前一包在动(排除停稳后的原地扰动)。
+        assist = False
+        if (not strong and v < STOP_V_KMH and pv >= STOP_V_KMH and st.scale
+                and tilt is not None and tilt < MID_TILT):
+            recent_v = [vv for tt, vv in st.speeds if tt < t]
+            gy_th = BRAKE_ASSIST_GYRO.get(st.scale, 60.0)
+            gyro_hit = any(g >= gy_th for tt, g in st.spikes if t - tt <= BRAKE_ASSIST_GYRO_S)
+            assist = bool(recent_v) and max(recent_v) >= BRAKE_ASSIST_V_KMH and gyro_hit
+        if strong or assist:
             st.last_brake_t = t
-            self._insert(device_id, "hard_brake", gps_time, gps_time, st, t,
-                         detail={"from_kmh": round(pv, 1), "to_kmh": round(v, 1),
-                                 "dt_s": round(dt, 1)})
+            from_v = pv if strong else max(vv for tt, vv in st.speeds if tt < t)
+            detail = {"from_kmh": round(from_v, 1), "to_kmh": round(v, 1), "dt_s": round(dt, 1)}
+            if assist:
+                detail["assist"] = 1
+            self._insert(device_id, "hard_brake", gps_time, gps_time, st, t, detail=detail)
 
     # ── 颠簸 ───────────────────────────────────────────
 
@@ -354,6 +411,7 @@ class EventDetector:
     # ── 停驻 ───────────────────────────────────────────
 
     def _stop_rule(self, device_id: str, st: _DevState, t: float, gps_time: str, v: float) -> None:
+        """只记录 ≥PARK_MIN_S 的长停驻(等餐/驻车),红绿灯等短停不入库。"""
         if st.stop_since is None:
             if v < STOP_V_KMH:
                 st.stop_since = t
@@ -364,15 +422,7 @@ class EventDetector:
             st.stop_saw_fall = True
         dur = t - st.stop_since
         if v >= GO_V_KMH:
-            if dur >= STOP_MIN_S and not st.stop_saw_fall:
-                etype = "stop_long" if dur >= PARK_MIN_S else "stop_short"
-                if st.stop_id is not None:
-                    self.storage.update_event(st.stop_id, end_time=gps_time,
-                                              detail={"duration_s": int(dur)})
-                else:
-                    self._insert(device_id, etype, st.stop_start_time, gps_time, st, t,
-                                 detail={"duration_s": int(dur)})
-            elif st.stop_id is not None:
+            if st.stop_id is not None:
                 self.storage.update_event(st.stop_id, end_time=gps_time,
                                           detail={"duration_s": int(dur)})
             st.stop_since = None
@@ -381,10 +431,10 @@ class EventDetector:
             return
         if dur >= PARK_MIN_S and st.stop_id is None and not st.stop_saw_fall:
             st.stop_id = self._insert(device_id, "stop_long", st.stop_start_time, gps_time,
-                                      st, t, detail={"duration_s": int(dur), "ongoing": 1})
+                                      st, t, detail={"duration_s": int(dur)})
         elif st.stop_id is not None:
             self.storage.update_event(st.stop_id, end_time=gps_time,
-                                      detail={"duration_s": int(dur), "ongoing": 1})
+                                      detail={"duration_s": int(dur)})
 
     # ── 工具 ───────────────────────────────────────────
 

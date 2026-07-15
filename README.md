@@ -52,7 +52,7 @@ uv run python scripts/mqtt_simulator.py --host <服务器IP> --device 9831040154
 | `GET /api/devices` | 设备列表(最新位置、在线状态、轨迹点数) |
 | `GET /api/devices/{id}/latest` | 最新一个轨迹点(含陀螺仪) |
 | `GET /api/devices/{id}/track?since_id=&start=&end=&limit=` | 轨迹查询:增量拉取用 `since_id`,历史回放用时间段 |
-| `GET /api/devices/{id}/events?start=&end=&limit=` | 事件查询:摔车(fall/fall_suspect,含方向)、急刹(hard_brake)、颠簸(bump)、停驻(stop_short/stop_long) |
+| `GET /api/devices/{id}/events?start=&end=&limit=` | 事件查询:摔车(fall/fall_suspect,含方向)、急刹(hard_brake,含陀螺辅助)、颠簸(bump)、长停驻(stop_long,≥5 分钟) |
 | `GET /api/config` | 前端配置(百度 AK、TCP 端口) |
 
 事件由服务端规则引擎(`tracker/events.py`)在数据入库时实时判定:六轴自标定
