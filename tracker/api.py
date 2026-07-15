@@ -112,4 +112,15 @@ def build_router(storage: Storage) -> APIRouter:
             points = _suppress_drift(points, context)
         return {"device_id": device_id, "count": len(points), "points": points}
 
+    @router.get("/devices/{device_id}/events")
+    def events(
+        device_id: str,
+        since_id: int = Query(default=0, ge=0),
+        start: str | None = Query(default=None, description="开始时间 YYYY-MM-DD HH:MM:SS"),
+        end: str | None = Query(default=None, description="结束时间"),
+        limit: int = Query(default=100, ge=1, le=1000),
+    ):
+        items = storage.list_events(device_id, since_id=since_id, start=start, end=end, limit=limit)
+        return {"device_id": device_id, "count": len(items), "events": items}
+
     return router

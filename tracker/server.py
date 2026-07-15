@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 from . import jt808
+from .events import EventDetector
 from .geo import wgs84_to_bd09
 from .rawlog import RawLogger
 from .storage import DB_DIR, Storage
@@ -21,6 +22,7 @@ class JT808Server:
         self._serial = 0
         self._server: asyncio.AbstractServer | None = None
         self._rawlog = RawLogger(DB_DIR / "raw")
+        self._detector = EventDetector(storage)
 
     def _next_serial(self) -> int:
         self._serial = (self._serial + 1) & 0xFFFF
@@ -92,6 +94,7 @@ class JT808Server:
             lon_bd, lat_bd = wgs84_to_bd09(point["lon"], point["lat"])
             self.storage.upsert_device(msg.phone)
             self.storage.insert_point(msg.phone, point, lon_bd=lon_bd, lat_bd=lat_bd)
+            self._detector.process(msg.phone, point, lon_bd=lon_bd, lat_bd=lat_bd)
             gyro = point.get("gyro")
             logger.debug(
                 "位置 %s (%.6f, %.6f) %skm/h %s",

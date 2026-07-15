@@ -59,6 +59,38 @@ body {
   vertical-align: 1px;
 }
 .empty { color: #999; text-align: center; padding: 26px 0; line-height: 1.9; border: 1px dashed #e2e4ea; border-radius: 10px; }
+
+.event-list { display: flex; flex-direction: column; gap: 6px; max-height: 300px; overflow-y: auto; }
+.event-list .empty { padding: 14px 0; }
+.event-item {
+  border: 1px solid #eceef2;
+  border-radius: 9px;
+  padding: 7px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.event-item:hover { border-color: #ffb28a; }
+.event-tag {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 5px;
+  padding: 2px 7px;
+  color: #fff;
+  background: #94949e;
+}
+.event-tag.fall { background: #e02020; }
+.event-tag.fall_suspect { background: #f97316; }
+.event-tag.hard_brake { background: #d97706; }
+.event-tag.bump { background: #ca8a04; }
+.event-tag.stop_short { background: #64748b; }
+.event-tag.stop_long { background: #475569; }
+.event-body { flex: 1; min-width: 0; }
+.event-time { color: #999; font-size: 11px; font-family: Consolas, monospace; }
+.event-desc { color: #444; margin-top: 1px; }
 .conn-info {
   background: #f7f8fa;
   border-radius: 10px;

@@ -11,6 +11,7 @@ let mode = "live";           // live | history
 let lastPointId = 0;
 let liveTimer = null;
 let deviceTimer = null;
+let evtTimer = null;
 
 async function api(path) {
   const res = await fetch(`/api${path}`);
@@ -85,6 +86,7 @@ window.selectDevice = function (deviceId) {
   currentDevice = deviceId;
   $("#teleDevice").textContent = deviceId;
   resetTrack();
+  renderEvents([]);
   refreshDevices();
   if (mode === "live") startLive();
 };
@@ -132,6 +134,72 @@ function appendPoints(points, { fit = false } = {}) {
     map.panTo(pos);
   }
   $("#trackStats").textContent = `轨迹点:${trackPath.length} · 最新:${last.gps_time}`;
+}
+
+/* ── 事件面板 ── */
+
+const EVENT_META = {
+  fall: "摔车",
+  fall_suspect: "疑似摔车",
+  hard_brake: "急刹车",
+  bump: "颠簸路段",
+  stop_short: "短暂停留",
+  stop_long: "长时驻留",
+};
+
+function eventDesc(e) {
+  const d = e.detail || {};
+  const parts = [];
+  if (e.type === "fall" || e.type === "fall_suspect") {
+    if (d.direction && d.direction !== "不明") parts.push(`向${d.direction}倒`);
+    if (d.tilt_max != null) parts.push(`倾角${d.tilt_max}°`);
+  } else if (e.type === "hard_brake") {
+    parts.push(`${d.from_kmh} → ${d.to_kmh} km/h`);
+  } else if (e.type === "bump") {
+    if (d.std_g != null) parts.push(`振动 ${d.std_g}g`);
+  } else if (d.duration_s != null) {
+    const m = Math.floor(d.duration_s / 60), s = d.duration_s % 60;
+    parts.push(m ? `${m}分${s}秒` : `${s}秒`);
+    if (d.ongoing) parts.push("进行中");
+  }
+  return parts.join(" · ");
+}
+
+function renderEvents(events) {
+  const list = $("#eventList");
+  $("#evtCount").textContent = events.length ? `${events.length} 条` : "";
+  if (!events.length) {
+    list.innerHTML = '<div class="empty muted">暂无事件</div>';
+    return;
+  }
+  list.innerHTML = events
+    .map((e) => {
+      const d = e.detail || {};
+      const pan = d.lon_bd ? ` onclick="panToEvent(${d.lon_bd},${d.lat_bd})"` : "";
+      const end = e.end_time && e.end_time !== e.start_time ? ` ~ ${e.end_time.slice(11)}` : "";
+      return `<div class="event-item"${pan}>
+        <span class="event-tag ${e.type}">${EVENT_META[e.type] || e.type}</span>
+        <div class="event-body">
+          <div class="event-time">${(e.start_time || "").slice(5)}${end}</div>
+          <div class="event-desc">${eventDesc(e)}</div>
+        </div>
+      </div>`;
+    })
+    .join("");
+}
+
+window.panToEvent = function (lon, lat) {
+  if (map) map.panTo(new BMapGL.Point(lon, lat));
+};
+
+async function refreshEvents(range) {
+  if (!currentDevice) return;
+  try {
+    let qs = "limit=50";
+    if (range) qs += `&start=${encodeURIComponent(range.start)}&end=${encodeURIComponent(range.end)}`;
+    const data = await api(`/devices/${currentDevice}/events?${qs}`);
+    renderEvents(data.events);
+  } catch (e) { /* 下轮再试 */ }
 }
 
 function updateTelemetry(p) {
@@ -194,10 +262,13 @@ async function startLive() {
       }
     } catch (e) { /* 网络抖动,下轮再试 */ }
   }, 1000);
+  refreshEvents();
+  evtTimer = setInterval(() => { if (mode === "live") refreshEvents(); }, 5000);
 }
 
 function stopLive() {
   if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  if (evtTimer) { clearInterval(evtTimer); evtTimer = null; }
 }
 
 /* ── 历史模式 ── */
@@ -210,6 +281,7 @@ async function queryHistory() {
   resetTrack();
   const params = new URLSearchParams({ start, end, limit: "50000" });
   const data = await api(`/devices/${currentDevice}/track?${params}`);
+  refreshEvents({ start, end });
   if (!data.count) {
     $("#trackStats").textContent = "该时间段没有轨迹数据";
     return;

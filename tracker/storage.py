@@ -40,6 +40,16 @@ CREATE TABLE IF NOT EXISTS track_points (
     extras      TEXT DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_track_device ON track_points(device_id, id);
+CREATE TABLE IF NOT EXISTS events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id   TEXT NOT NULL,
+    type        TEXT NOT NULL,
+    start_time  TEXT NOT NULL,
+    end_time    TEXT,
+    server_ts   REAL NOT NULL,
+    detail      TEXT DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_events_device ON events(device_id, id);
 """
 
 
@@ -215,3 +225,69 @@ class Storage:
         d = dict(row)
         d["extras"] = json.loads(d.get("extras") or "{}")
         return d
+
+    # ── 事件 ───────────────────────────────────────────
+
+    def insert_event(self, device_id: str, etype: str, start_time: str,
+                     end_time: str | None, detail: dict[str, Any]) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO events(device_id, type, start_time, end_time, server_ts, detail)"
+                " VALUES (?,?,?,?,?,?)",
+                (device_id, etype, start_time, end_time, time.time(),
+                 json.dumps(detail, ensure_ascii=False)),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid or 0)
+
+    def update_event(self, event_id: int, etype: str | None = None,
+                     end_time: str | None = None,
+                     detail: dict[str, Any] | None = None) -> None:
+        with self._lock:
+            if detail is not None:
+                row = self._conn.execute(
+                    "SELECT detail FROM events WHERE id = ?", (event_id,)
+                ).fetchone()
+                merged = json.loads(row["detail"] or "{}") if row else {}
+                merged.update(detail)
+                self._conn.execute(
+                    "UPDATE events SET detail = ? WHERE id = ?",
+                    (json.dumps(merged, ensure_ascii=False), event_id),
+                )
+            if etype is not None:
+                self._conn.execute("UPDATE events SET type = ? WHERE id = ?", (etype, event_id))
+            if end_time is not None:
+                self._conn.execute(
+                    "UPDATE events SET end_time = ? WHERE id = ?", (end_time, event_id)
+                )
+            self._conn.commit()
+
+    def list_events(
+        self,
+        device_id: str,
+        since_id: int = 0,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM events WHERE device_id = ?"
+        args: list[Any] = [device_id]
+        if since_id:
+            sql += " AND id > ?"
+            args.append(since_id)
+        if start:
+            sql += " AND start_time >= ?"
+            args.append(start)
+        if end:
+            sql += " AND start_time <= ?"
+            args.append(end)
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(max(1, min(limit, 1000)))
+        with self._lock:
+            rows = self._conn.execute(sql, args).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["detail"] = json.loads(d.get("detail") or "{}")
+            out.append(d)
+        return out

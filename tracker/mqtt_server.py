@@ -17,6 +17,7 @@ import struct
 import time
 from typing import Any
 
+from .events import EventDetector
 from .geo import wgs84_to_bd09
 from .rawlog import RawLogger
 from .storage import DB_DIR, Storage
@@ -90,6 +91,7 @@ class MQTTServer:
         self._server: asyncio.AbstractServer | None = None
         self._conns: set[_Conn] = set()
         self._rawlog = RawLogger(DB_DIR / "raw", prefix="mqtt")
+        self._detector = EventDetector(storage)
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(self._handle_conn, self.host, self.port)
@@ -307,3 +309,4 @@ class MQTTServer:
         lon_bd, lat_bd = wgs84_to_bd09(lon, lat)
         self.storage.upsert_device(dev, protocol="mqtt")
         self.storage.insert_point(dev, point, lon_bd=lon_bd, lat_bd=lat_bd)
+        self._detector.process(dev, point, lon_bd=lon_bd, lat_bd=lat_bd)
