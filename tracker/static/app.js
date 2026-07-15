@@ -159,12 +159,15 @@ async function startLive() {
     const since = Math.max(0, latest.id - 600); // 先画最近 ~10 分钟
     const data = await api(`/devices/${currentDevice}/track?since_id=${since}`);
     appendPoints(data.points, { fit: true });
-    // 近期没有有效移动轨迹时,也要把车标定在最后上报位置
-    if (!marker) {
+    // 近期没有有效移动轨迹时,把车标定在最后一次有效定位;从未定位过则不放标(避免画到 (0,0) 海上)
+    if (!marker && latest.located) {
       const pos = new BMapGL.Point(latest.lon_bd, latest.lat_bd);
       marker = new BMapGL.Marker(pos);
       map.addOverlay(marker);
       map.centerAndZoom(pos, 16);
+    }
+    if (!marker && !latest.located) {
+      $("#trackStats").textContent = "设备当前未定位(GPS 无效),数据照常接收,定位有效后自动显示";
     }
     updateTelemetry(latest);
   } catch (e) {
@@ -179,12 +182,14 @@ async function startLive() {
       if (!data.points.length) {
         const latest = await api(`/devices/${currentDevice}/latest`);
         updateTelemetry(latest);
-        const pos = new BMapGL.Point(latest.lon_bd, latest.lat_bd);
-        if (!marker) {
-          marker = new BMapGL.Marker(pos);
-          map.addOverlay(marker);
-        } else if (latest.located) {
-          marker.setPosition(pos);
+        if (latest.located) {
+          const pos = new BMapGL.Point(latest.lon_bd, latest.lat_bd);
+          if (!marker) {
+            marker = new BMapGL.Marker(pos);
+            map.addOverlay(marker);
+          } else {
+            marker.setPosition(pos);
+          }
         }
       }
     } catch (e) { /* 网络抖动,下轮再试 */ }
