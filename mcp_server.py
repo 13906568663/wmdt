@@ -151,6 +151,54 @@ def _rev_geocode(lat: float, lon: float) -> str:
     return text
 
 
+_BD_X_PI = math.pi * 3000.0 / 180.0
+
+
+def _bd09_to_wgs84(lon_bd: float, lat_bd: float) -> tuple[float, float]:
+    """百度 BD09 → WGS-84(近似逆变换,街道级精度足够)。
+
+    事件明细里只存了 BD09 坐标(lat_bd/lon_bd),而 OSM 逆地理要 WGS-84,
+    这里 BD09→GCJ02→WGS84 两步还原。
+    """
+    # BD09 -> GCJ02
+    x, y = lon_bd - 0.0065, lat_bd - 0.006
+    z = math.sqrt(x * x + y * y) - 0.00002 * math.sin(y * _BD_X_PI)
+    theta = math.atan2(y, x) - 0.000003 * math.cos(x * _BD_X_PI)
+    glon, glat = z * math.cos(theta), z * math.sin(theta)
+    # GCJ02 -> WGS84(粗略反向:算出偏移后相减)
+    a, ee = 6378245.0, 0.00669342162296594323
+    dlat = (
+        -100.0 + 2.0 * (glon - 105.0) + 3.0 * (glat - 35.0)
+        + 0.2 * (glat - 35.0) ** 2 + 0.1 * (glon - 105.0) * (glat - 35.0)
+        + 0.2 * math.sqrt(abs(glon - 105.0))
+        + (20.0 * math.sin(6.0 * (glon - 105.0) * math.pi) + 20.0 * math.sin(2.0 * (glon - 105.0) * math.pi)) * 2.0 / 3.0
+        + (20.0 * math.sin((glat - 35.0) * math.pi) + 40.0 * math.sin((glat - 35.0) / 3.0 * math.pi)) * 2.0 / 3.0
+        + (160.0 * math.sin((glat - 35.0) / 12.0 * math.pi) + 320 * math.sin((glat - 35.0) * math.pi / 30.0)) * 2.0 / 3.0
+    )
+    dlon = (
+        300.0 + (glon - 105.0) + 2.0 * (glat - 35.0) + 0.1 * (glon - 105.0) ** 2
+        + 0.1 * (glon - 105.0) * (glat - 35.0) + 0.1 * math.sqrt(abs(glon - 105.0))
+        + (20.0 * math.sin(6.0 * (glon - 105.0) * math.pi) + 20.0 * math.sin(2.0 * (glon - 105.0) * math.pi)) * 2.0 / 3.0
+        + (20.0 * math.sin((glon - 105.0) * math.pi) + 40.0 * math.sin((glon - 105.0) / 3.0 * math.pi)) * 2.0 / 3.0
+        + (150.0 * math.sin((glon - 105.0) / 12.0 * math.pi) + 300.0 * math.sin((glon - 105.0) / 30.0 * math.pi)) * 2.0 / 3.0
+    )
+    radlat = glat / 180.0 * math.pi
+    magic = 1 - ee * math.sin(radlat) ** 2
+    sqrtmagic = math.sqrt(magic)
+    dlat = (dlat * 180.0) / ((a * (1 - ee)) / (magic * sqrtmagic) * math.pi)
+    dlon = (dlon * 180.0) / (a / sqrtmagic * math.cos(radlat) * math.pi)
+    return glon - dlon, glat - dlat
+
+
+def _event_addr(detail: dict[str, Any]) -> str:
+    """从事件明细的 BD09 坐标反查街道地址;无坐标返回空串。"""
+    lon_bd, lat_bd = detail.get("lon_bd"), detail.get("lat_bd")
+    if not lon_bd or not lat_bd:
+        return ""
+    lon, lat = _bd09_to_wgs84(float(lon_bd), float(lat_bd))
+    return _rev_geocode(lat, lon)
+
+
 # ──────────────────────────────────────────────────────────────
 # 小工具
 # ──────────────────────────────────────────────────────────────
@@ -331,8 +379,8 @@ def get_track_summary(
 @mcp.tool(
     name="list_vehicle_events",
     description=(
-        "查询安全事件记录:摔车、急刹车、颠簸路段、长时间停驻。"
-        "用户问'今天有没有摔车/急刹了几次/有什么异常'时用这个。"
+        "查询安全事件记录:摔车、急刹车、颠簸路段、长时间停驻,每条都带发生地点(街道地址)。"
+        "用户问'今天有没有摔车/在哪摔的/急刹了几次/有什么异常'时用这个。"
         "device_id 不填=查所有设备;时间不填默认今天。"
     ),
 )
@@ -380,7 +428,9 @@ def list_vehicle_events(
             extra = f",从 {det['from_kmh']:.0f} 刹到 {det['to_kmh']:.0f}km/h"
         elif e["type"] == "stop_long" and det.get("duration_s"):
             extra = f",停了 {det['duration_s'] // 60} 分钟"
-        lines.append(f"{e['start_time']} 设备 {d['device_id']}:{name}{extra}")
+        addr = _event_addr(det)
+        where = f",地点:{addr}" if addr else ""
+        lines.append(f"{e['start_time']} 设备 {d['device_id']}:{name}{extra}{where}")
     if len(all_events) > 10:
         lines.append(f"(仅列出最近 10 条,其余 {len(all_events) - 10} 条略)")
     return "\n".join(lines)
