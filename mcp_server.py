@@ -110,6 +110,21 @@ def _effective_id(device_id: str) -> str:
     return FIXED_DEVICE or (device_id or "").strip()
 
 
+def _last_located_point(api: str, device_id: str, minutes: int = 30) -> dict[str, Any] | None:
+    """回退查最近 minutes 分钟内最后一个有效定位点(用 all=1 取原始点,绕过漂移抑制)。
+
+    设备 GPS 常断续(最新一包可能恰好未定位),定位查询不该因此直接放弃。
+    """
+    start = (datetime.now() - timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        data = _get(api, f"/api/devices/{device_id}/track", all=1, start=start, end=end, limit=50000)
+    except Exception:
+        return None
+    located = [p for p in data.get("points", []) if p.get("located")]
+    return located[-1] if located else None
+
+
 # ──────────────────────────────────────────────────────────────
 # 逆地理(OSM Nominatim,免费公共服务,限速 1 次/秒 + 网格缓存)
 # ──────────────────────────────────────────────────────────────
@@ -313,14 +328,27 @@ def get_vehicle_location(
     except Exception:
         return f"设备 {device_id} 还没有轨迹数据。"
     state = "在线" if d.get("online") else f"已离线,最后上报 {_ago_text(d.get('last_seen'))}"
-    if not p.get("located"):
-        return f"设备 {device_id}【{d['_hw']}】{state}。最新一包 GPS 未定位(可能在室内),无法给出位置。"
-    addr = _rev_geocode(p["lat"], p["lon"])
-    spd = p.get("speed") or 0
-    moving = f"正以 {spd:.0f}km/h 向{_dir_text(p.get('direction'))}行驶" if spd >= 3 else "处于静止"
+    if p.get("located"):
+        addr = _rev_geocode(p["lat"], p["lon"])
+        spd = p.get("speed") or 0
+        moving = f"正以 {spd:.0f}km/h 向{_dir_text(p.get('direction'))}行驶" if spd >= 3 else "处于静止"
+        return (
+            f"设备 {device_id}【{d['_hw']}】{state}。"
+            f"位置:{addr};{moving};定位时间 {p.get('gps_time')}。"
+        )
+    # 最新一包未定位:GPS 断续很常见,回退到最近 30 分钟内最后一个有效定位点,
+    # 别直接说"查不到"——多半几分钟前才刚定位过。
+    last = _last_located_point(d["_api"], d["device_id"], minutes=30)
+    if last is None:
+        return (
+            f"设备 {device_id}【{d['_hw']}】{state}。当前 GPS 未定位,"
+            "最近半小时也没有有效定位(可能一直在室内或信号遮挡),暂时给不出位置。"
+        )
+    addr = _rev_geocode(last["lat"], last["lon"])
+    ago = _ago_text(last.get("server_ts"))
     return (
-        f"设备 {device_id}【{d['_hw']}】{state}。"
-        f"位置:{addr};{moving};定位时间 {p.get('gps_time')}。"
+        f"设备 {device_id}【{d['_hw']}】{state}。当前 GPS 信号弱、暂未定位;"
+        f"最近一次定位在:{addr}(定位时间 {last['gps_time']},约 {ago})。"
     )
 
 
