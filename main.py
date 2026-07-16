@@ -38,6 +38,10 @@ MQTT_PORT = int(os.getenv("TRACKER_MQTT_PORT", "18883"))
 ENABLE_JT808 = os.getenv("TRACKER_ENABLE_JT808", "1") == "1"
 ENABLE_MQTT = os.getenv("TRACKER_ENABLE_MQTT", "1") == "1"
 BAIDU_AK = os.getenv("BAIDU_MAP_AK", "mS6xcVAJ12xyvGDiJiTH0dxVHnoWFeYf")
+# 派单系统地址(公网可达,浏览器直连拉订单叠加到地图);留空则页面不显示订单图层
+DISPATCH_API = os.getenv("DISPATCH_API_URL", "").rstrip("/")
+# 演示聚焦设备:设置后页面只显示这一台并自动选中
+FOCUS_DEVICE = os.getenv("TRACKER_FOCUS_DEVICE", "").strip()
 
 STATIC_DIR = Path(__file__).parent / "tracker" / "static"
 
@@ -70,6 +74,8 @@ def get_config():
         "baidu_ak": BAIDU_AK,
         "tcp_port": TCP_PORT if ENABLE_JT808 else None,
         "mqtt_port": MQTT_PORT if ENABLE_MQTT else None,
+        "dispatch_api": DISPATCH_API or None,
+        "focus_device": FOCUS_DEVICE or None,
     }
 
 
