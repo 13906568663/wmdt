@@ -8,6 +8,9 @@
     TRACKER_JT808_API   JT808 实例地址,默认 http://wmdt:18209
     TRACKER_MQTT_API    MQTT 实例地址,默认 http://wmdt-mqtt:18209
     MCP_PORT            监听端口,默认 18210
+    BAIDU_SERVER_AK     百度地图服务端 AK(逆地理门牌级 + POI 检索 + 骑行路线);
+                        留空则逆地理走 OSM、路线规划不可用
+    BAIDU_REGION        POI 检索限定城市,默认 深圳
 
 启动:python mcp_server.py  →  MCP 接入点 http://<host>:18210/mcp(streamable-http)
 """
@@ -17,6 +20,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta
@@ -37,6 +41,9 @@ MCP_PORT = int(os.getenv("MCP_PORT", "18210"))
 # 锁定单一设备:设置后所有工具只查这台车,忽略入参 device_id,不再要求用户/客户选择。
 # 留空则保持多设备行为。
 FIXED_DEVICE = os.getenv("TRACKER_FIXED_DEVICE", "").strip()
+# 百度地图服务端 AK:有则逆地理走百度(门牌级)、启用 plan_route 路线规划;无则退回 OSM。
+BAIDU_AK = os.getenv("BAIDU_SERVER_AK", "").strip()
+BAIDU_REGION = os.getenv("BAIDU_REGION", "深圳").strip()
 
 _DEVICE_ARG_DESC = (
     f"设备号;系统已锁定为 {FIXED_DEVICE},不填即可"
@@ -56,7 +63,8 @@ INSTRUCTIONS = (
     "外卖平台车辆数据查询。平台接入两类硬件:车机(JT808 协议)和智能刹车盒(MQTT 协议),"
     "都上报 GPS 轨迹与陀螺仪数据,服务端实时判定摔车/急刹车/颠簸/长时间停驻事件。"
     "可查:车辆列表与在线状态、某辆车当前位置(含街道地址)、时间段轨迹摘要(里程/时长/速度)、"
-    "安全事件记录。设备号即车辆标识,用户说'车'、'骑手'、'设备'都指它。"
+    "安全事件记录;并支持从车辆当前位置到指定目的地的骑行路线规划(距离/耗时/转弯指引)。"
+    "设备号即车辆标识,用户说'车'、'骑手'、'设备'都指它。"
 )
 
 if FIXED_DEVICE:
@@ -126,12 +134,49 @@ def _last_located_point(api: str, device_id: str, minutes: int = 30) -> dict[str
 
 
 # ──────────────────────────────────────────────────────────────
-# 逆地理(OSM Nominatim,免费公共服务,限速 1 次/秒 + 网格缓存)
+# 逆地理:百度优先(门牌级,需 BAIDU_SERVER_AK),OSM Nominatim 兜底
 # ──────────────────────────────────────────────────────────────
 
 _geo_cache: dict[tuple[float, float], str] = {}
 _geo_lock = threading.Lock()
 _geo_last_call = 0.0
+
+
+def _rev_geocode_baidu(lat: float, lon: float) -> str:
+    """百度逆地理(直接吃 WGS84),返回门牌级地址;失败返回空串。"""
+    r = _http.get(
+        "https://api.map.baidu.com/reverse_geocoding/v3/",
+        params={"ak": BAIDU_AK, "output": "json", "coordtype": "wgs84ll",
+                "location": f"{lat},{lon}"},
+        timeout=8,
+    )
+    d = r.json()
+    if d.get("status") != 0:
+        logger.warning("百度逆地理失败 status=%s %s", d.get("status"), d.get("message"))
+        return ""
+    res = d.get("result") or {}
+    text = res.get("formatted_address") or ""
+    # 去掉冗长的省市前缀,语音播报更顺
+    return text.removeprefix("广东省").removeprefix("深圳市")
+
+
+def _rev_geocode_osm(lat: float, lon: float) -> str:
+    """OSM Nominatim 逆地理(免费兜底,社区级);失败返回空串。"""
+    global _geo_last_call
+    wait = _geo_last_call + 1.1 - time.time()
+    if wait > 0:
+        time.sleep(wait)
+    _geo_last_call = time.time()
+    r = _http.get(
+        "https://nominatim.openstreetmap.org/reverse",
+        params={"lat": lat, "lon": lon, "format": "jsonv2",
+                "accept-language": "zh-CN", "zoom": 17},
+        headers={"User-Agent": "waimai-tracker-mcp/1.0"},
+        timeout=8,
+    )
+    a = r.json().get("address", {})
+    parts = [a.get(k, "") for k in ("city", "suburb", "quarter", "road")]
+    return "".join(p for p in parts if p) or r.json().get("display_name", "")
 
 
 def _rev_geocode(lat: float, lon: float) -> str:
@@ -142,25 +187,18 @@ def _rev_geocode(lat: float, lon: float) -> str:
     with _geo_lock:
         if key in _geo_cache:
             return _geo_cache[key]
-    global _geo_last_call
-    wait = _geo_last_call + 1.1 - time.time()
-    if wait > 0:
-        time.sleep(wait)
-    _geo_last_call = time.time()
-    try:
-        r = _http.get(
-            "https://nominatim.openstreetmap.org/reverse",
-            params={"lat": lat, "lon": lon, "format": "jsonv2",
-                    "accept-language": "zh-CN", "zoom": 17},
-            headers={"User-Agent": "waimai-tracker-mcp/1.0"},
-            timeout=8,
-        )
-        a = r.json().get("address", {})
-        parts = [a.get(k, "") for k in ("city", "suburb", "quarter", "road")]
-        text = "".join(p for p in parts if p) or r.json().get("display_name", "")
-        text = text or f"北纬{lat:.4f} 东经{lon:.4f}"
-    except Exception:
-        text = f"北纬{lat:.4f} 东经{lon:.4f}"
+    text = ""
+    if BAIDU_AK:
+        try:
+            text = _rev_geocode_baidu(lat, lon)
+        except Exception:
+            logger.exception("百度逆地理异常")
+    if not text:
+        try:
+            text = _rev_geocode_osm(lat, lon)
+        except Exception:
+            pass
+    text = text or f"北纬{lat:.4f} 东经{lon:.4f}"
     with _geo_lock:
         _geo_cache[key] = text
     return text
@@ -212,6 +250,56 @@ def _event_addr(detail: dict[str, Any]) -> str:
         return ""
     lon, lat = _bd09_to_wgs84(float(lon_bd), float(lat_bd))
     return _rev_geocode(lat, lon)
+
+
+# ──────────────────────────────────────────────────────────────
+# 百度 POI 检索 + 骑行路线规划(plan_route 用)
+# ──────────────────────────────────────────────────────────────
+
+
+def _poi_search(query: str) -> dict[str, Any] | None:
+    """百度地点检索:目的地名称 → {name, address, lat_bd, lon_bd};找不到返回 None。"""
+    r = _http.get(
+        "https://api.map.baidu.com/place/v2/search",
+        params={"ak": BAIDU_AK, "output": "json", "query": query,
+                "region": BAIDU_REGION, "city_limit": "true", "page_size": 1},
+        timeout=8,
+    )
+    d = r.json()
+    if d.get("status") != 0 or not d.get("results"):
+        return None
+    top = d["results"][0]
+    loc = top.get("location") or {}
+    if not loc.get("lat"):
+        return None
+    return {"name": top.get("name", query), "address": top.get("address", ""),
+            "lat_bd": loc["lat"], "lon_bd": loc["lng"]}
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _riding_route(o_lat_bd: float, o_lon_bd: float, d_lat_bd: float, d_lon_bd: float) -> dict[str, Any] | None:
+    """百度骑行路线规划(电动车模式,BD09 坐标);失败返回 None。"""
+    r = _http.get(
+        "https://api.map.baidu.com/direction/v2/riding",
+        params={"ak": BAIDU_AK, "riding_type": 1,
+                "origin": f"{o_lat_bd},{o_lon_bd}",
+                "destination": f"{d_lat_bd},{d_lon_bd}"},
+        timeout=12,
+    )
+    d = r.json()
+    routes = (d.get("result") or {}).get("routes") or []
+    if d.get("status") != 0 or not routes:
+        logger.warning("百度骑行规划失败 status=%s %s", d.get("status"), d.get("message"))
+        return None
+    route = routes[0]
+    steps = []
+    for s in route.get("steps", []):
+        text = _TAG_RE.sub("", s.get("instructions") or s.get("instruction") or "").strip()
+        if text:
+            steps.append(text)
+    return {"distance_m": route.get("distance", 0), "duration_s": route.get("duration", 0), "steps": steps}
 
 
 # ──────────────────────────────────────────────────────────────
@@ -349,6 +437,66 @@ def get_vehicle_location(
     return (
         f"设备 {device_id}【{d['_hw']}】{state}。当前 GPS 信号弱、暂未定位;"
         f"最近一次定位在:{addr}(定位时间 {last['gps_time']},约 {ago})。"
+    )
+
+
+@mcp.tool(
+    name="plan_route",
+    description=(
+        "路线规划:从车辆当前位置骑行去某个目的地,返回距离、预计耗时和关键转弯指引。"
+        "用户问'去XX怎么走/到XX多远/骑过去要多久'时用这个。"
+        "destination 填目的地名称(如'西乡地铁站'、'沃尔玛蛇口店'),不用带城市名。"
+    ),
+)
+def plan_route(
+    destination: Annotated[str, Field(description="目的地名称或地址,如 西乡地铁站")],
+    device_id: Annotated[str, Field(description=_DEVICE_ARG_DESC)] = "",
+) -> str:
+    if not BAIDU_AK:
+        return "路线规划服务未配置(缺少百度地图 AK),暂时无法使用。"
+    destination = (destination or "").strip()
+    if not destination:
+        return "请告诉我目的地名称,比如'西乡地铁站'。"
+    device_id = _effective_id(device_id)
+    d = _find_device(device_id) if device_id else None
+    if d is None:
+        return f"没有找到设备 {device_id},无法确定出发位置。"
+
+    # 起点:最新定位包,未定位则回退最近 30 分钟内的有效定位点
+    origin = None
+    try:
+        p = _get(d["_api"], f"/api/devices/{d['device_id']}/latest")
+        if p.get("located"):
+            origin = p
+    except Exception:
+        pass
+    if origin is None:
+        origin = _last_located_point(d["_api"], d["device_id"], minutes=30)
+    if origin is None:
+        return "当前查不到车辆位置(GPS 长时间未定位),无法规划路线。"
+
+    poi = _poi_search(destination)
+    if poi is None:
+        return f"没有找到目的地「{destination}」,换个更具体的名称试试(如带上商圈或街道名)。"
+
+    from tracker.geo import wgs84_to_bd09
+
+    o_lon_bd, o_lat_bd = wgs84_to_bd09(origin["lon"], origin["lat"])
+    route = _riding_route(o_lat_bd, o_lon_bd, poi["lat_bd"], poi["lon_bd"])
+    if route is None:
+        return f"到「{poi['name']}」的骑行路线规划失败,稍后再试。"
+
+    km = route["distance_m"] / 1000
+    mins = max(1, round(route["duration_s"] / 60))
+    # 语音场景只报前几个关键动作,不逐条念完
+    steps = route["steps"][:4]
+    step_text = ";".join(steps)
+    if len(route["steps"]) > 4:
+        step_text += ";之后按导航继续"
+    dest_text = poi["name"] + (f"({poi['address']})" if poi.get("address") else "")
+    return (
+        f"从当前位置到{dest_text}:骑行约 {km:.1f} 公里,预计 {mins} 分钟。"
+        f"路线:{step_text}。"
     )
 
 
