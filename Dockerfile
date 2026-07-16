@@ -6,12 +6,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir "fastapi>=0.115" "uvicorn>=0.30"
+RUN pip install --no-cache-dir "fastapi>=0.115" "uvicorn>=0.30" "mcp>=1.9" "httpx>=0.27"
 
-COPY main.py ./
+COPY main.py mcp_server.py ./
 COPY tracker/ tracker/
 COPY scripts/ scripts/
 
-EXPOSE 18209 18808 18883
+EXPOSE 18209 18808 18883 18210
 
 CMD ["python", "main.py"]

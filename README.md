@@ -97,6 +97,26 @@ docker run -d --name wmdt-mqtt --restart unless-stopped \
 | JT808 | `服务器IP:18808`(TCP) | `http://服务器IP:18209/` |
 | MQTT | `服务器IP:18883`(TCP) | `http://服务器IP:18309/` |
 
+### MCP 查询服务(暴露给 AI 平台)
+
+`mcp_server.py` 是独立的 MCP 聚合服务(streamable-http,路径 `/mcp`),
+通过 REST 同时查询上面两个实例,暴露语音友好的查询工具:
+`list_vehicles` / `get_vehicle_location`(含 OSM 逆地理地址)/
+`get_track_summary`(里程/时长/速度)/ `list_vehicle_events`(摔车/急刹/颠簸/长停驻)/
+`get_fleet_overview`。
+
+```bash
+# 与两个实例同镜像,单独一个容器;挂进 AI 平台所在 docker 网络供其内网调用
+docker run -d --name wmdt-mcp --restart unless-stopped \
+  --network agent-flow_default \
+  -e TRACKER_JT808_API=http://wmdt:18209 \
+  -e TRACKER_MQTT_API=http://wmdt-mqtt:18209 \
+  -p 18210:18210 waimai-tracker python mcp_server.py
+```
+
+需要宿主机 bridge 网络里的 `wmdt` / `wmdt-mqtt` 可达:上面示例假设两实例
+也已 `docker network connect agent-flow_default wmdt`(或改用宿主 IP:端口)。
+
 设备接入细节见 `docs/设备接入文档.md`(JT808)与 `docs/MQTT设备接入文档.md`。
 
 ## 目录结构
