@@ -268,7 +268,8 @@ let eventDots = {};  // event_id -> overlay
 
 function renderEventDots(events) {
   const wanted = {};
-  for (const e of events) {
+  // events 最新在前;红点只画最近 10 条,避免测试期高频事件铺满地图
+  for (const e of events.slice(0, 10)) {
     const d = e.detail || {};
     if (!d.lon_bd || !d.lat_bd) continue;
     if (!["fall", "fall_suspect", "hard_brake"].includes(e.type)) continue;
@@ -312,8 +313,12 @@ async function startLive() {
   if (!currentDevice) return;
   try {
     const latest = await api(`/devices/${currentDevice}/latest`);
-    const since = Math.max(0, latest.id - 600); // 先画最近 ~10 分钟
-    const data = await api(`/devices/${currentDevice}/track?since_id=${since}`);
+    // 回填窗口只取最近 3 分钟:静止时 GPS 室内漂移会积累成满屏乱线,
+    // 窗口越短开场越干净;更早的轨迹用"历史轨迹"页查
+    const toLocal = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 19).replace("T", " ");
+    const start = toLocal(new Date(Date.now() - 3 * 60 * 1000));
+    const data = await api(`/devices/${currentDevice}/track?start=${encodeURIComponent(start)}`);
+    lastPointId = latest.id;  // 增量从当前最新开始,避免重画回填窗口之前的漂移
     appendPoints(data.points, { fit: true });
     // 近期没有有效移动轨迹时,把车标定在最后一次有效定位;从未定位过则不放标(避免画到 (0,0) 海上)
     if (!marker && latest.located) {
@@ -383,6 +388,23 @@ async function queryHistory() {
 $("#tabLive").onclick = () => switchMode("live");
 $("#tabHistory").onclick = () => switchMode("history");
 $("#btnQuery").onclick = queryHistory;
+
+// 一键清屏:抹掉已画轨迹与红点,车标留在原地,从"现在"开始重新画
+$("#btnClear").onclick = async () => {
+  if (!currentDevice) return;
+  const pos = marker ? marker.getPosition() : null;
+  resetTrack();
+  try {
+    const latest = await api(`/devices/${currentDevice}/latest`);
+    lastPointId = latest.id;
+    if (latest.located) {
+      marker = riderMarker(new BMapGL.Point(latest.lon_bd, latest.lat_bd));
+    } else if (pos) {
+      marker = riderMarker(pos);
+    }
+  } catch (e) { if (pos) marker = riderMarker(pos); }
+  $("#trackStats").textContent = "轨迹已清除,从当前时刻开始记录";
+};
 
 function switchMode(m) {
   mode = m;
