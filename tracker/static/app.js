@@ -296,13 +296,16 @@ function updateTelemetry(p) {
   $("#teleTime").textContent = p.gps_time + (p.located ? "" : " (未定位)");
   $("#tSpeed").textContent = p.speed;
   $("#tDirection").textContent = p.direction + "°";
-  const fmt = (v) => (v == null ? "-" : v);
-  $("#tGyroX").textContent = fmt(p.gyro_x);
-  $("#tGyroY").textContent = fmt(p.gyro_y);
-  $("#tGyroZ").textContent = fmt(p.gyro_z);
-  $("#tAccX").textContent = fmt(p.acc_x);
-  $("#tAccY").textContent = fmt(p.acc_y);
-  $("#tAccZ").textContent = fmt(p.acc_z);
+  // 设备上报的陀螺/加速度是浮点原始值,尾数很长;显示层统一收敛:
+  // 陀螺仪保留 1 位小数,加速度取整(mG)。存储与事件判定仍用原始精度。
+  const gyro = (v) => (v == null ? "-" : Math.round(v * 10) / 10);
+  const acc = (v) => (v == null ? "-" : Math.round(v));
+  $("#tGyroX").textContent = gyro(p.gyro_x);
+  $("#tGyroY").textContent = gyro(p.gyro_y);
+  $("#tGyroZ").textContent = gyro(p.gyro_z);
+  $("#tAccX").textContent = acc(p.acc_x);
+  $("#tAccY").textContent = acc(p.acc_y);
+  $("#tAccZ").textContent = acc(p.acc_z);
 }
 
 /* ── 实时模式:先取近期尾巴,再增量轮询 ── */
