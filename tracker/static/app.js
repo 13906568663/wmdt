@@ -164,22 +164,28 @@ function resetTrack() {
 function appendPoints(points, { fit = false } = {}) {
   if (!points.length) return;
   for (const p of points) {
-    trackPath.push(new BMapGL.Point(p.lon_bd, p.lat_bd));
     lastPointId = Math.max(lastPointId, p.id);
   }
-  if (!polyline) {
-    polyline = new BMapGL.Polyline(trackPath, {
-      strokeColor: "#ff5000",
-      strokeWeight: 5,
-      strokeOpacity: 0.85,
-    });
-    map.addOverlay(polyline);
-  } else {
-    polyline.setPath(trackPath);
-  }
-
   const last = points[points.length - 1];
   const pos = new BMapGL.Point(last.lon_bd, last.lat_bd);
+
+  // 轨迹线只在"历史轨迹"模式画;实时页只动骑手图标,保持画面干净
+  if (mode === "history") {
+    for (const p of points) {
+      trackPath.push(new BMapGL.Point(p.lon_bd, p.lat_bd));
+    }
+    if (!polyline) {
+      polyline = new BMapGL.Polyline(trackPath, {
+        strokeColor: "#ff5000",
+        strokeWeight: 5,
+        strokeOpacity: 0.85,
+      });
+      map.addOverlay(polyline);
+    } else {
+      polyline.setPath(trackPath);
+    }
+  }
+
   if (!marker) {
     marker = riderMarker(pos);
   } else {
@@ -187,12 +193,14 @@ function appendPoints(points, { fit = false } = {}) {
   }
   updateTelemetry(last);
 
-  if (fit && trackPath.length > 1) {
-    map.setViewport(trackPath);
-  } else if (mode === "live" && $("#followSwitch").checked) {
-    map.panTo(pos);
+  if (mode === "history") {
+    if (fit && trackPath.length > 1) map.setViewport(trackPath);
+    $("#trackStats").textContent = `轨迹点:${trackPath.length} · 最新:${last.gps_time}`;
+  } else {
+    if (fit) map.centerAndZoom(pos, 16);
+    else if ($("#followSwitch").checked) map.panTo(pos);
+    $("#trackStats").textContent = `最新上报:${last.gps_time}`;
   }
-  $("#trackStats").textContent = `轨迹点:${trackPath.length} · 最新:${last.gps_time}`;
 }
 
 /* ── 事件面板 ── */
@@ -391,23 +399,6 @@ async function queryHistory() {
 $("#tabLive").onclick = () => switchMode("live");
 $("#tabHistory").onclick = () => switchMode("history");
 $("#btnQuery").onclick = queryHistory;
-
-// 一键清屏:抹掉已画轨迹与红点,车标留在原地,从"现在"开始重新画
-$("#btnClear").onclick = async () => {
-  if (!currentDevice) return;
-  const pos = marker ? marker.getPosition() : null;
-  resetTrack();
-  try {
-    const latest = await api(`/devices/${currentDevice}/latest`);
-    lastPointId = latest.id;
-    if (latest.located) {
-      marker = riderMarker(new BMapGL.Point(latest.lon_bd, latest.lat_bd));
-    } else if (pos) {
-      marker = riderMarker(pos);
-    }
-  } catch (e) { if (pos) marker = riderMarker(pos); }
-  $("#trackStats").textContent = "轨迹已清除,从当前时刻开始记录";
-};
 
 function switchMode(m) {
   mode = m;
