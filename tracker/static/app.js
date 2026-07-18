@@ -482,38 +482,89 @@ async function refreshOrders() {
     poiMarkers[key] = { marker: m, label };
   }
 
-  // 2) 在途订单连线:骑手(真车) → 未取店铺 → 买家
+  // 2) 在途订单连线:骑手(真车) → 未取店铺 → 买家,分段走百度骑行路线贴真实道路
   const riderPos = marker ? marker.getPosition() : null;
   const wantedLines = {};
   for (const o of active) {
     if (o.status === "PENDING") continue; // 未接的单只亮标记,不拉线
-    const path = [];
-    if (riderPos) path.push(riderPos);
+    const pts = [];
+    if (riderPos) pts.push(riderPos);
     for (const p of o.pickups) {
       if (p.status === "PICKED") continue;
       const shop = (state.shops || []).find((s) => s.id === p.shop_id);
-      if (shop && shop.lng) path.push(new BMapGL.Point(shop.lng, shop.lat));
+      if (shop && shop.lng) pts.push(new BMapGL.Point(shop.lng, shop.lat));
     }
     const b = (state.buyers || []).find((x) => x.id === o.buyer.id);
-    if (b && b.lng) path.push(new BMapGL.Point(b.lng, b.lat));
-    if (path.length >= 2) wantedLines[o.id] = { path, color: ORDER_COLORS[o.status] || "#94949e" };
+    if (b && b.lng) pts.push(new BMapGL.Point(b.lng, b.lat));
+    if (pts.length >= 2) wantedLines[o.id] = { pts, color: ORDER_COLORS[o.status] || "#94949e" };
   }
   for (const id of Object.keys(orderLines)) {
     if (!wantedLines[id]) { map.removeOverlay(orderLines[id]); delete orderLines[id]; }
   }
   for (const [id, cfg] of Object.entries(wantedLines)) {
-    if (orderLines[id]) {
-      orderLines[id].setPath(cfg.path);
+    const { path, routed } = buildRoutedPath(cfg.pts);
+    const style = routed
+      ? { strokeColor: cfg.color, strokeWeight: 5, strokeOpacity: 0.85, strokeStyle: "solid" }
+      : { strokeColor: cfg.color, strokeWeight: 3, strokeOpacity: 0.75, strokeStyle: "dashed" };
+    if (orderLines[id] && orderLines[id].__routed === routed) {
+      orderLines[id].setPath(path);
     } else {
-      const line = new BMapGL.Polyline(cfg.path, {
-        strokeColor: cfg.color, strokeWeight: 3, strokeOpacity: 0.75, strokeStyle: "dashed",
-      });
+      if (orderLines[id]) map.removeOverlay(orderLines[id]);
+      const line = new BMapGL.Polyline(path, style);
+      line.__routed = routed;
       map.addOverlay(line);
       orderLines[id] = line;
     }
   }
 
   renderOrderCards(active, state);
+}
+
+/* ── 真实骑行路线:分段调百度路线规划,端点量化缓存,失败回退直线虚线 ── */
+
+const _routeCache = {};    // "a|b" -> Point[](null = 规划失败,用直线)
+const _routePending = {};  // 防止同段并发重复请求
+
+function _q(p) { return p.lng.toFixed(4) + "," + p.lat.toFixed(4); } // ~10m 网格
+
+function _requestRoute(a, b) {
+  const key = _q(a) + "|" + _q(b);
+  if (key in _routeCache || _routePending[key]) return;
+  const Svc = BMapGL.RidingRoute || BMapGL.WalkingRoute;
+  if (!Svc) { _routeCache[key] = null; return; }
+  _routePending[key] = true;
+  // 缓存无限增长保护(演示场景端点有限,骑手移动会产生新格子)
+  if (Object.keys(_routeCache).length > 300) for (const k of Object.keys(_routeCache)) delete _routeCache[k];
+  const svc = new Svc(map, {
+    onSearchComplete: (res) => {
+      delete _routePending[key];
+      try {
+        const plan = res && res.getPlan ? res.getPlan(0) : null;
+        const route = plan && plan.getRoute ? plan.getRoute(0) : null;
+        const path = route && route.getPath ? route.getPath() : null;
+        _routeCache[key] = path && path.length > 1 ? path : null;
+      } catch (e) { _routeCache[key] = null; }
+    },
+  });
+  try { svc.search(a, b); } catch (e) { delete _routePending[key]; _routeCache[key] = null; }
+}
+
+function buildRoutedPath(pts) {
+  // 逐段取缓存的真实路线;缺的段先用直线顶着并异步请求,下轮刷新自然替换
+  let full = [];
+  let routedAll = true;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const key = _q(pts[i]) + "|" + _q(pts[i + 1]);
+    const seg = _routeCache[key];
+    if (seg && seg.length > 1) {
+      full = full.concat(seg);
+    } else {
+      if (!(key in _routeCache)) _requestRoute(pts[i], pts[i + 1]);
+      full.push(pts[i], pts[i + 1]);
+      routedAll = false;
+    }
+  }
+  return { path: full, routed: routedAll };
 }
 
 function renderOrderCards(active, state) {
