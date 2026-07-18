@@ -138,6 +138,26 @@ def _effective_id(device_id: str) -> str:
     return _pick_active_device()
 
 
+def _resolve_device(device_id: str) -> tuple[dict[str, Any] | None, str]:
+    """把入参解析成平台真实设备,返回 (设备, 说明前缀)。
+
+    上游(语音端)常转述来平台不存在的编号(设备自身 ID / 用户口述),
+    找不到时不报错,回退到当前活跃设备并在回复里注明,避免反问用户。
+    """
+    device_id = _effective_id(device_id)
+    if not device_id:
+        return None, ""
+    d = _find_device(device_id)
+    if d is not None:
+        return d, ""
+    fallback = _pick_active_device()
+    if fallback and fallback != device_id:
+        fd = _find_device(fallback)
+        if fd is not None:
+            return fd, f"(编号 {device_id} 不在平台,已按当前活跃设备 {fallback} 查询)"
+    return None, ""
+
+
 def _last_located_point(api: str, device_id: str, minutes: int = 30) -> dict[str, Any] | None:
     """回退查最近 minutes 分钟内最后一个有效定位点(用 all=1 取原始点,绕过漂移抑制)。
 
@@ -451,16 +471,14 @@ def list_vehicles() -> str:
 def get_vehicle_location(
     device_id: Annotated[str, Field(description=_DEVICE_ARG_DESC)] = "",
 ) -> str:
-    device_id = _effective_id(device_id)
-    if not device_id:
-        return "请提供设备号,或先用 list_vehicles 查设备列表。"
-    d = _find_device(device_id)
+    d, note = _resolve_device(device_id)
     if d is None:
-        return f"没有找到设备 {device_id},可先用 list_vehicles 查设备列表。"
+        return "平台当前没有任何设备接入,查不到位置。"
+    device_id = d["device_id"]
     try:
         p = _get(d["_api"], f"/api/devices/{d['device_id']}/latest")
     except Exception:
-        return f"设备 {device_id} 还没有轨迹数据。"
+        return f"设备 {device_id} 还没有轨迹数据。{note}"
     state = "在线" if d.get("online") else f"已离线,最后上报 {_ago_text(d.get('last_seen'))}"
     if p.get("located"):
         addr = _rev_geocode(p["lat"], p["lon"])
@@ -468,7 +486,7 @@ def get_vehicle_location(
         moving = f"正以 {spd:.0f}km/h 向{_dir_text(p.get('direction'))}行驶" if spd >= 3 else "处于静止"
         return (
             f"设备 {device_id}【{d['_hw']}】{state}。"
-            f"位置:{addr};{moving};定位时间 {p.get('gps_time')}。"
+            f"位置:{addr};{moving};定位时间 {p.get('gps_time')}。{note}"
         )
     # 最新一包未定位:GPS 断续很常见,回退到最近 30 分钟内最后一个有效定位点,
     # 别直接说"查不到"——多半几分钟前才刚定位过。
@@ -476,13 +494,13 @@ def get_vehicle_location(
     if last is None:
         return (
             f"设备 {device_id}【{d['_hw']}】{state}。当前 GPS 未定位,"
-            "最近半小时也没有有效定位(可能一直在室内或信号遮挡),暂时给不出位置。"
+            f"最近半小时也没有有效定位(可能一直在室内或信号遮挡),暂时给不出位置。{note}"
         )
     addr = _rev_geocode(last["lat"], last["lon"])
     ago = _ago_text(last.get("server_ts"))
     return (
         f"设备 {device_id}【{d['_hw']}】{state}。当前 GPS 信号弱、暂未定位;"
-        f"最近一次定位在:{addr}(定位时间 {last['gps_time']},约 {ago})。"
+        f"最近一次定位在:{addr}(定位时间 {last['gps_time']},约 {ago})。{note}"
     )
 
 
@@ -503,10 +521,9 @@ def plan_route(
     destination = (destination or "").strip()
     if not destination:
         return "请告诉我目的地名称,比如'西乡地铁站'。"
-    device_id = _effective_id(device_id)
-    d = _find_device(device_id) if device_id else None
+    d, _note = _resolve_device(device_id)
     if d is None:
-        return f"没有找到设备 {device_id},无法确定出发位置。"
+        return "平台当前没有任何设备接入,无法确定出发位置。"
 
     # 起点:最新定位包,未定位则回退最近 30 分钟内的有效定位点
     origin = None
@@ -563,10 +580,9 @@ def find_nearby(
     if not BAIDU_AK:
         return "周边搜索服务未配置(缺少百度地图 AK),暂时无法使用。"
     keyword = (keyword or "").strip() or "美食"
-    device_id = _effective_id(device_id)
-    d = _find_device(device_id) if device_id else None
+    d, _note = _resolve_device(device_id)
     if d is None:
-        return f"没有找到设备 {device_id},无法确定搜索中心位置。"
+        return "平台当前没有任何设备接入,无法确定搜索中心位置。"
 
     origin = None
     try:
@@ -612,12 +628,10 @@ def get_track_summary(
     start_time: Annotated[str, Field(description="开始时间 YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS,默认今天 0 点")] = "",
     end_time: Annotated[str, Field(description="结束时间,默认现在")] = "",
 ) -> str:
-    device_id = _effective_id(device_id)
-    if not device_id:
-        return "请提供设备号,或先用 list_vehicles 查设备列表。"
-    d = _find_device(device_id)
+    d, note = _resolve_device(device_id)
     if d is None:
-        return f"没有找到设备 {device_id},可先用 list_vehicles 查设备列表。"
+        return "平台当前没有任何设备接入,查不到轨迹。"
+    device_id = d["device_id"]
     start = _norm_time(start_time, _today_start())
     end = _norm_time(end_time, datetime.now())
     try:
@@ -648,7 +662,7 @@ def get_track_summary(
         f"设备 {device_id} 在 {pts[0]['gps_time']} ~ {pts[-1]['gps_time']}:"
         f"行驶约 {km:.1f} 公里,移动时长约 {move_sec / 60:.0f} 分钟,"
         f"平均 {avg:.0f}km/h,最高 {top_speed:.0f}km/h。"
-        f"起点:{start_addr};终点:{end_addr}。"
+        f"起点:{start_addr};终点:{end_addr}。{note}"
     )
 
 
@@ -670,9 +684,11 @@ def list_vehicle_events(
     end = _norm_time(end_time, datetime.now())
     targets = _all_devices()
     if device_id:
-        targets = [d for d in targets if d["device_id"] == device_id]
+        matched = [d for d in targets if d["device_id"] == device_id]
+        # 上游转述的编号不在平台时,不报错也不反问:直接查全部设备的事件
+        targets = matched or targets
         if not targets:
-            return f"没有找到设备 {device_id},可先用 list_vehicles 查设备列表。"
+            return "平台当前没有任何设备接入,没有事件记录。"
 
     all_events: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for d in targets:
