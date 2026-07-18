@@ -48,7 +48,7 @@ BAIDU_REGION = os.getenv("BAIDU_REGION", "深圳").strip()
 _DEVICE_ARG_DESC = (
     f"设备号;系统已锁定为 {FIXED_DEVICE},不填即可"
     if FIXED_DEVICE
-    else "设备号,如 14808381029;不确定就先调 list_vehicles"
+    else "设备号;不填自动选当前活跃(最近上报)的设备,一般无需填写,不要向用户询问设备号"
 )
 
 # (api_base, 硬件说明)
@@ -72,6 +72,11 @@ if FIXED_DEVICE:
     INSTRUCTIONS += (
         f" 本平台当前只服务一台车(设备号 {FIXED_DEVICE}),所有查询默认就是这台,"
         "无需向用户确认或让用户选择设备,device_id 一律不用填。"
+    )
+else:
+    INSTRUCTIONS += (
+        " 查询默认自动跟踪当前活跃(最近上报)的设备,device_id 一律不用填,"
+        "严禁向用户反问'要查哪台设备'。"
     )
 
 
@@ -114,9 +119,23 @@ def _visible_devices() -> list[dict[str, Any]]:
     return devices
 
 
+def _pick_active_device() -> str:
+    """自动选当前活跃设备:在线里最近上报的;都离线则取最近上报的。"""
+    devices = _all_devices()
+    if not devices:
+        return ""
+    online = [d for d in devices if d.get("online")]
+    pool = online or devices
+    return max(pool, key=lambda d: d.get("last_seen") or 0)["device_id"]
+
+
 def _effective_id(device_id: str) -> str:
-    """锁定单设备时始终用锁定设备,否则用入参。"""
-    return FIXED_DEVICE or (device_id or "").strip()
+    """锁定设备 > 显式入参 > 自动选活跃设备。演示时无需任何人指定设备。"""
+    if FIXED_DEVICE:
+        return FIXED_DEVICE
+    if (device_id or "").strip():
+        return device_id.strip()
+    return _pick_active_device()
 
 
 def _last_located_point(api: str, device_id: str, minutes: int = 30) -> dict[str, Any] | None:

@@ -91,7 +91,7 @@ function riderMarker(pos) {
 function initMap() {
   initIcons();
   map = new BMapGL.Map("map");
-  map.centerAndZoom(new BMapGL.Point(113.93, 22.53), 13); // 默认深圳
+  map.centerAndZoom(new BMapGL.Point(120.005, 30.29), 14); // 默认杭州仓前(梦想小镇一带)
   map.enableScrollWheelZoom(true);
   map.addControl(new BMapGL.ZoomControl());
   map.addControl(new BMapGL.ScaleControl());
