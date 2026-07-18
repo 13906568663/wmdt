@@ -482,38 +482,64 @@ async function refreshOrders() {
     poiMarkers[key] = { marker: m, label };
   }
 
-  // 2) 在途订单连线:骑手(真车) → 未取店铺 → 买家,分段走百度骑行路线贴真实道路
+  // 2) 在途订单连线:起点永远是骑手(设备)。
+  //    取餐段(骑手→未取店铺)橙色;送餐段(最后取货点→买家,全取完后骑手→买家)绿色。
   const riderPos = marker ? marker.getPosition() : null;
-  const wantedLines = {};
+  const PICK_COLOR = "#f97316", DELIVER_COLOR = "#16a34a";
+  const wantedLines = {};  // key: orderId -> [{pts, color}, ...]
   for (const o of active) {
-    if (o.status === "PENDING") continue; // 未接的单只亮标记,不拉线
-    const pts = [];
-    if (riderPos) pts.push(riderPos);
+    if (o.status === "PENDING" || !riderPos) continue; // 未接的单只亮标记,不拉线
+    const segs = [];
+    const unpicked = [];
     for (const p of o.pickups) {
       if (p.status === "PICKED") continue;
       const shop = (state.shops || []).find((s) => s.id === p.shop_id);
-      if (shop && shop.lng) pts.push(new BMapGL.Point(shop.lng, shop.lat));
+      if (shop && shop.lng) unpicked.push(new BMapGL.Point(shop.lng, shop.lat));
     }
     const b = (state.buyers || []).find((x) => x.id === o.buyer.id);
-    if (b && b.lng) pts.push(new BMapGL.Point(b.lng, b.lat));
-    if (pts.length >= 2) wantedLines[o.id] = { pts, color: ORDER_COLORS[o.status] || "#94949e" };
+    const buyerPt = b && b.lng ? new BMapGL.Point(b.lng, b.lat) : null;
+    if (unpicked.length) {
+      segs.push({ pts: [riderPos, ...unpicked], color: PICK_COLOR });
+      if (buyerPt) segs.push({ pts: [unpicked[unpicked.length - 1], buyerPt], color: DELIVER_COLOR });
+    } else if (buyerPt) {
+      segs.push({ pts: [riderPos, buyerPt], color: DELIVER_COLOR });
+    }
+    if (segs.length) wantedLines[o.id] = segs;
   }
   for (const id of Object.keys(orderLines)) {
-    if (!wantedLines[id]) { map.removeOverlay(orderLines[id]); delete orderLines[id]; }
+    if (!wantedLines[id]) {
+      for (const l of orderLines[id]) map.removeOverlay(l);
+      delete orderLines[id];
+    }
   }
-  for (const [id, cfg] of Object.entries(wantedLines)) {
-    const { path, routed } = buildRoutedPath(cfg.pts);
-    const style = routed
-      ? { strokeColor: cfg.color, strokeWeight: 5, strokeOpacity: 0.85, strokeStyle: "solid" }
-      : { strokeColor: cfg.color, strokeWeight: 3, strokeOpacity: 0.75, strokeStyle: "dashed" };
-    if (orderLines[id] && orderLines[id].__routed === routed) {
-      orderLines[id].setPath(path);
+  for (const [id, segs] of Object.entries(wantedLines)) {
+    const lines = orderLines[id] || [];
+    // 段数或样式变化时整组重建,简单可靠
+    let rebuild = lines.length !== segs.length;
+    if (!rebuild) {
+      for (let i = 0; i < segs.length; i++) {
+        const { routed } = buildRoutedPath(segs[i].pts);
+        if (lines[i].__routed !== routed || lines[i].__color !== segs[i].color) { rebuild = true; break; }
+      }
+    }
+    if (rebuild) {
+      for (const l of lines) map.removeOverlay(l);
+      orderLines[id] = segs.map((seg) => {
+        const { path, routed } = buildRoutedPath(seg.pts);
+        const style = routed
+          ? { strokeColor: seg.color, strokeWeight: 5, strokeOpacity: 0.85, strokeStyle: "solid" }
+          : { strokeColor: seg.color, strokeWeight: 3, strokeOpacity: 0.75, strokeStyle: "dashed" };
+        const line = new BMapGL.Polyline(path, style);
+        line.__routed = routed;
+        line.__color = seg.color;
+        map.addOverlay(line);
+        return line;
+      });
     } else {
-      if (orderLines[id]) map.removeOverlay(orderLines[id]);
-      const line = new BMapGL.Polyline(path, style);
-      line.__routed = routed;
-      map.addOverlay(line);
-      orderLines[id] = line;
+      for (let i = 0; i < segs.length; i++) {
+        const { path } = buildRoutedPath(segs[i].pts);
+        lines[i].setPath(path);
+      }
     }
   }
 

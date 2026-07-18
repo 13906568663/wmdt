@@ -44,6 +44,14 @@ FIXED_DEVICE = os.getenv("TRACKER_FIXED_DEVICE", "").strip()
 # 百度地图服务端 AK:有则逆地理走百度(门牌级)、启用 plan_route 路线规划;无则退回 OSM。
 BAIDU_AK = os.getenv("BAIDU_SERVER_AK", "").strip()
 BAIDU_REGION = os.getenv("BAIDU_REGION", "深圳").strip()
+# ── 演示模式 ──
+# DEMO_ORIGIN(WGS84 "lon,lat"):设备完全无定位时,位置/路线/周边以此固定起点兜底,
+# 保证演示环节(骑手起点固定)不因 GPS 未锁定而翻车;留空关闭。
+DEMO_ORIGIN = os.getenv("DEMO_ORIGIN", "").strip()
+DEMO_ORIGIN_NAME = os.getenv("DEMO_ORIGIN_NAME", "梦想小镇互联网村").strip()
+# DEMO_SCRIPT=1:plan_route 对固定演示目的地返回写死的"老司机"路线话术(内容恒定),
+# 其他目的地仍走百度实时规划。
+DEMO_SCRIPT = os.getenv("DEMO_SCRIPT", "0").strip() == "1"
 
 _DEVICE_ARG_DESC = (
     f"设备号;系统已锁定为 {FIXED_DEVICE},不填即可"
@@ -319,6 +327,73 @@ def _poi_search(query: str) -> dict[str, Any] | None:
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
+# ──────────────────────────────────────────────────────────────
+# 演示剧本:固定目的地 → 写死的"老骑手"路线话术(内容恒定,不走实时规划)
+# 距离/路名基于演示起点(梦想小镇互联网村)的百度真实骑行规划结果。
+# ──────────────────────────────────────────────────────────────
+
+_DEMO_ROUTES: list[tuple[tuple[str, ...], str]] = [
+    (
+        ("敕勒川", "砂锅", "牛腩", "牛杂"),
+        "敕勒川砂锅牛腩牛杂煲就在你旁边,梦想小镇互联网村1号楼一楼,过去不到一分钟。"
+        "老骑手提示:园区里面限速,人多的时候推车走反而更快;商户已出货,到店报单号直接取餐。",
+    ),
+    (
+        ("鸡公煲", "万通"),
+        "到重庆鸡公煲杭师大店约1.8公里,骑行8分钟:出园区走仓兴街,右转上良睦路辅路,"
+        "转东莲街骑450米,时尚万通城1幢沿街就到。"
+        "老骑手提示:东莲街路窄注意会车;店门口禁停,车停马路对面非机动车位,取餐更快。",
+    ),
+    (
+        ("正元", "智慧", "邵"),
+        "送到正元智慧A栋约3.2公里,骑行14分钟:出园区走仓兴街,右转良睦路辅路,"
+        "沿余杭塘路直行1.3公里,到舒心路口进正元智慧大厦。"
+        "老骑手提示:送A幢13层,大堂登记走货梯,高峰期电梯慢,预留三分钟;收货人邵先生,尾号6147。",
+    ),
+    (
+        ("科技园", "杭师大", "D幢", "D305", "张"),
+        "送到杭州师范大学科技园D幢约3.9公里,骑行16分钟:出园区走仓兴街,右转良睦路辅路,"
+        "沿余杭塘路辅路直行1.8公里,到龙潭路左转,从科技园北门进,D幢在园区里侧。"
+        "老骑手提示:顾客备注放D305门口就行,不用打电话;北门保安问就说送外卖到D幢。",
+    ),
+]
+
+
+def _demo_route_text(destination: str) -> str | None:
+    """DEMO_SCRIPT 开启时,固定目的地命中剧本直接返回写死话术。"""
+    if not DEMO_SCRIPT:
+        return None
+    for keys, text in _DEMO_ROUTES:
+        if any(k in destination for k in keys):
+            return text
+    return None
+
+
+def _demo_origin_point() -> dict[str, Any] | None:
+    """DEMO_ORIGIN 配置的固定演示起点(WGS84 lon,lat),GPS 全无时兜底。"""
+    if not DEMO_ORIGIN:
+        return None
+    try:
+        lon, lat = (float(x) for x in DEMO_ORIGIN.split(","))
+    except ValueError:
+        logger.warning("DEMO_ORIGIN 格式错误(应为 lon,lat): %s", DEMO_ORIGIN)
+        return None
+    return {"lon": lon, "lat": lat, "speed": 0, "located": 1,
+            "gps_time": "演示起点", "server_ts": time.time(), "_demo": True}
+
+
+def _origin_of(d: dict[str, Any]) -> dict[str, Any] | None:
+    """路线/周边搜索的起点:最新定位 > 最近30分钟定位 > 固定演示起点。"""
+    try:
+        p = _get(d["_api"], f"/api/devices/{d['device_id']}/latest")
+        if p.get("located"):
+            return p
+    except Exception:
+        pass
+    origin = _last_located_point(d["_api"], d["device_id"], minutes=30)
+    return origin or _demo_origin_point()
+
+
 def _poi_nearby(query: str, lat_bd: float, lon_bd: float, radius_m: int = 1500) -> list[dict[str, Any]]:
     """百度周边检索:以 BD09 坐标为圆心搜关键词,返回按距离排序的 POI 列表。"""
     r = _http.get(
@@ -492,6 +567,12 @@ def get_vehicle_location(
     # 别直接说"查不到"——多半几分钟前才刚定位过。
     last = _last_located_point(d["_api"], d["device_id"], minutes=30)
     if last is None:
+        if DEMO_ORIGIN:
+            # 演示兜底:按固定演示起点播报,保证"骑手起点固定"环节不翻车
+            return (
+                f"设备 {device_id}【{d['_hw']}】{state}。"
+                f"当前在{DEMO_ORIGIN_NAME}附近(GPS 信号弱,按骑手驻点位置报告)。{note}"
+            )
         return (
             f"设备 {device_id}【{d['_hw']}】{state}。当前 GPS 未定位,"
             f"最近半小时也没有有效定位(可能一直在室内或信号遮挡),暂时给不出位置。{note}"
@@ -520,21 +601,16 @@ def plan_route(
         return "路线规划服务未配置(缺少百度地图 AK),暂时无法使用。"
     destination = (destination or "").strip()
     if not destination:
-        return "请告诉我目的地名称,比如'西乡地铁站'。"
+        return "请告诉我目的地名称,比如'时尚万通城'。"
+    # 演示剧本:固定目的地返回恒定话术(含老骑手提示),不走实时规划
+    scripted = _demo_route_text(destination)
+    if scripted is not None:
+        return scripted
     d, _note = _resolve_device(device_id)
     if d is None:
         return "平台当前没有任何设备接入,无法确定出发位置。"
 
-    # 起点:最新定位包,未定位则回退最近 30 分钟内的有效定位点
-    origin = None
-    try:
-        p = _get(d["_api"], f"/api/devices/{d['device_id']}/latest")
-        if p.get("located"):
-            origin = p
-    except Exception:
-        pass
-    if origin is None:
-        origin = _last_located_point(d["_api"], d["device_id"], minutes=30)
+    origin = _origin_of(d)
     if origin is None:
         return "当前查不到车辆位置(GPS 长时间未定位),无法规划路线。"
 
@@ -584,15 +660,7 @@ def find_nearby(
     if d is None:
         return "平台当前没有任何设备接入,无法确定搜索中心位置。"
 
-    origin = None
-    try:
-        p = _get(d["_api"], f"/api/devices/{d['device_id']}/latest")
-        if p.get("located"):
-            origin = p
-    except Exception:
-        pass
-    if origin is None:
-        origin = _last_located_point(d["_api"], d["device_id"], minutes=30)
+    origin = _origin_of(d)
     if origin is None:
         return "当前查不到车辆位置(GPS 长时间未定位),无法搜索周边。"
 
