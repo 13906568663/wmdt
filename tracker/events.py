@@ -1,4 +1,7 @@
-"""事件规则引擎:摔车(含方向)/疑似摔车/急刹/颠簸/长停驻。
+"""事件规则引擎:摔车(含方向)/疑似摔车/超速/急刹/颠簸/长停驻。
+
+展示层(网页事件列表与 MCP 查询)只暴露摔车与超速两类;急刹/颠簸/停驻
+仍照常入库留作数据积累,由 storage.list_events 统一过滤。
 
 阈值来源与回代验证见 docs/事件规则分析_20260715夜测.md。设计要点:
 
@@ -19,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import statistics
 import time
 from typing import Any
@@ -80,6 +84,11 @@ STOP_V_KMH = 2.0                    # 低于视为静止
 GO_V_KMH = 4.0                      # 高于视为恢复移动(迟滞)
 PARK_MIN_S = 300.0                  # 仅记录 ≥5 分钟的长停驻(等餐/驻车),红绿灯等短停不入库
 
+# ── 超速 ──
+SPEED_LIMIT_KMH = float(os.getenv("TRACKER_SPEED_LIMIT_KMH", "25"))  # 电动车国标限速
+SPEED_CONFIRM_N = 3                 # 连续超限包数才开事件(滤 GPS 速度毛刺)
+SPEED_END_KMH = max(5.0, SPEED_LIMIT_KMH - 3.0)  # 迟滞:回落到此速以下才算结束
+
 
 def _mag(v: tuple[float, float, float]) -> float:
     return math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2)
@@ -130,6 +139,11 @@ class _DevState:
         self.stop_start_time = ""
         self.stop_id: int | None = None
         self.stop_saw_fall = False
+        # 超速
+        self.over_run = 0
+        self.speed_id: int | None = None
+        self.speed_start = ""
+        self.speed_max = 0.0
 
 
 class EventDetector:
@@ -185,6 +199,7 @@ class EventDetector:
             self._bump_rule(device_id, st, t, gps_time, v, a_g)
         self._brake_rule(device_id, st, t, gps_time, v, tilt)
         self._stop_rule(device_id, st, t, gps_time, v)
+        self._speed_rule(device_id, st, t, gps_time, v)
         st.prev_v = (t, v)
 
     # ── 标定 ───────────────────────────────────────────
@@ -435,6 +450,31 @@ class EventDetector:
         elif st.stop_id is not None:
             self.storage.update_event(st.stop_id, end_time=gps_time,
                                       detail={"duration_s": int(dur)})
+
+    # ── 超速 ───────────────────────────────────────────
+
+    def _speed_rule(self, device_id: str, st: _DevState, t: float, gps_time: str, v: float) -> None:
+        """连续 SPEED_CONFIRM_N 包超过限速开事件;回落到迟滞线以下闭合。"""
+        if v >= SPEED_LIMIT_KMH:
+            st.over_run += 1
+            if st.over_run == 1:
+                st.speed_start = gps_time
+            st.speed_max = max(st.speed_max, v)
+            if st.speed_id is None and st.over_run >= SPEED_CONFIRM_N:
+                st.speed_id = self._insert(
+                    device_id, "overspeed", st.speed_start, gps_time, st, t,
+                    detail={"max_kmh": round(st.speed_max, 1), "limit_kmh": SPEED_LIMIT_KMH})
+            elif st.speed_id is not None:
+                self.storage.update_event(st.speed_id, end_time=gps_time,
+                                          detail={"max_kmh": round(st.speed_max, 1)})
+        elif v < SPEED_END_KMH:
+            if st.speed_id is not None:
+                self.storage.update_event(st.speed_id, end_time=gps_time,
+                                          detail={"max_kmh": round(st.speed_max, 1)})
+            st.over_run = 0
+            st.speed_id = None
+            st.speed_max = 0.0
+        # SPEED_END_KMH ~ SPEED_LIMIT_KMH 之间维持现状(迟滞区)
 
     # ── 工具 ───────────────────────────────────────────
 

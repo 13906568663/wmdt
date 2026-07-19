@@ -8,9 +8,7 @@
     TRACKER_JT808_API   JT808 实例地址,默认 http://wmdt:18209
     TRACKER_MQTT_API    MQTT 实例地址,默认 http://wmdt-mqtt:18209
     MCP_PORT            监听端口,默认 18210
-    BAIDU_SERVER_AK     百度地图服务端 AK(逆地理门牌级 + POI 检索);
-                        留空则逆地理走 OSM
-    BAIDU_REGION        POI 检索限定城市,默认 深圳
+    BAIDU_SERVER_AK     百度地图服务端 AK(逆地理门牌级);留空则逆地理走 OSM
 
 启动:python mcp_server.py  →  MCP 接入点 http://<host>:18210/mcp(streamable-http)
 """
@@ -40,9 +38,8 @@ MCP_PORT = int(os.getenv("MCP_PORT", "18210"))
 # 锁定单一设备:设置后所有工具只查这台车,忽略入参 device_id,不再要求用户/客户选择。
 # 留空则保持多设备行为。
 FIXED_DEVICE = os.getenv("TRACKER_FIXED_DEVICE", "").strip()
-# 百度地图服务端 AK:有则逆地理走百度(门牌级)、启用周边检索;无则退回 OSM。
+# 百度地图服务端 AK:有则逆地理走百度(门牌级);无则退回 OSM。
 BAIDU_AK = os.getenv("BAIDU_SERVER_AK", "").strip()
-BAIDU_REGION = os.getenv("BAIDU_REGION", "深圳").strip()
 # ── 演示模式 ──
 # DEMO_ORIGIN(WGS84 "lon,lat"):设备完全无定位时,位置/周边以此固定起点兜底,
 # 保证演示环节(骑手起点固定)不因 GPS 未锁定而翻车;留空关闭。
@@ -65,10 +62,10 @@ _http = httpx.Client(timeout=30)
 
 INSTRUCTIONS = (
     "外卖平台车辆数据查询。平台接入两类硬件:车机(JT808 协议)和智能刹车盒(MQTT 协议),"
-    "都上报 GPS 轨迹与陀螺仪数据,服务端实时判定摔车/急刹车/颠簸/长时间停驻事件。"
+    "都上报 GPS 轨迹与陀螺仪数据,服务端实时判定摔车、超速两类安全事件。"
     "可查:车辆列表与在线状态、某辆车当前位置(含街道地址)、时间段轨迹摘要(里程/时长/速度)、"
-    "安全事件记录;并支持周边地点搜索(美食/餐馆/药店等,带距离评分人均)。"
-    "路线规划不由本服务提供(平台地图自动规划,按平台路线走即可)。"
+    "摔车/超速事件记录。"
+    "路线规划与周边搜索不由本服务提供(平台地图自动规划,按平台路线走即可)。"
     "设备号即车辆标识,用户说'车'、'骑手'、'设备'都指它。"
 )
 
@@ -297,74 +294,16 @@ def _event_addr(detail: dict[str, Any]) -> str:
 
 
 # ──────────────────────────────────────────────────────────────
-# 百度 POI 周边检索(find_nearby 用)与演示起点兜底
-# 路线规划已下线:平台地图自动规划,尾程决策由派单系统的骑手情报承担。
-# ──────────────────────────────────────────────────────────────
-
-
-def _demo_origin_point() -> dict[str, Any] | None:
-    """DEMO_ORIGIN 配置的固定演示起点(WGS84 lon,lat),GPS 全无时兜底。"""
-    if not DEMO_ORIGIN:
-        return None
-    try:
-        lon, lat = (float(x) for x in DEMO_ORIGIN.split(","))
-    except ValueError:
-        logger.warning("DEMO_ORIGIN 格式错误(应为 lon,lat): %s", DEMO_ORIGIN)
-        return None
-    return {"lon": lon, "lat": lat, "speed": 0, "located": 1,
-            "gps_time": "演示起点", "server_ts": time.time(), "_demo": True}
-
-
-def _origin_of(d: dict[str, Any]) -> dict[str, Any] | None:
-    """路线/周边搜索的起点:最新定位 > 最近30分钟定位 > 固定演示起点。"""
-    try:
-        p = _get(d["_api"], f"/api/devices/{d['device_id']}/latest")
-        if p.get("located"):
-            return p
-    except Exception:
-        pass
-    origin = _last_located_point(d["_api"], d["device_id"], minutes=30)
-    return origin or _demo_origin_point()
-
-
-def _poi_nearby(query: str, lat_bd: float, lon_bd: float, radius_m: int = 1500) -> list[dict[str, Any]]:
-    """百度周边检索:以 BD09 坐标为圆心搜关键词,返回按距离排序的 POI 列表。"""
-    r = _http.get(
-        "https://api.map.baidu.com/place/v2/search",
-        params={"ak": BAIDU_AK, "output": "json", "query": query,
-                "location": f"{lat_bd},{lon_bd}", "radius": radius_m,
-                "scope": 2, "filter": "sort_name:distance", "page_size": 8},
-        timeout=8,
-    )
-    d = r.json()
-    if d.get("status") != 0:
-        logger.warning("百度周边检索失败 status=%s %s", d.get("status"), d.get("message"))
-        return []
-    out = []
-    for item in d.get("results") or []:
-        det = item.get("detail_info") or {}
-        out.append({
-            "name": item.get("name", ""),
-            "address": item.get("address", ""),
-            "distance_m": det.get("distance"),
-            "rating": det.get("overall_rating"),
-            "price": det.get("price"),
-        })
-    return out
-
-
-# ──────────────────────────────────────────────────────────────
 # 小工具
 # ──────────────────────────────────────────────────────────────
 
 _DIRS = ["北", "东北", "东", "东南", "南", "西南", "西", "西北"]
 
+# 对外只暴露摔车与超速两类事件(产品定位);采集端其他事件不再展示。
 EVENT_NAMES = {
     "fall": "摔车",
     "fall_suspect": "疑似摔车",
-    "hard_brake": "急刹车",
-    "bump": "颠簸路段",
-    "stop_long": "长时间停驻",
+    "overspeed": "超速",
 }
 
 
@@ -496,51 +435,6 @@ def get_vehicle_location(
 
 
 @mcp.tool(
-    name="find_nearby",
-    description=(
-        "搜索车辆当前位置周边的地点:美食/餐馆/小吃/药店/超市/充电站等,"
-        "返回名称、距离、评分、人均价格。用户问'附近有什么吃的/哪家评分高/最近的XX在哪'时用这个。"
-        "keyword 填要找的东西,如'美食'、'麻辣烫'、'沙县小吃'、'充电站'。"
-        "结果是本地实时数据,比联网搜索快且准,周边问题优先用我。"
-    ),
-)
-def find_nearby(
-    keyword: Annotated[str, Field(description="搜索关键词,如 美食、麻辣烫、药店")],
-    radius_m: Annotated[int, Field(description="搜索半径(米),默认 1500")] = 1500,
-    device_id: Annotated[str, Field(description=_DEVICE_ARG_DESC)] = "",
-) -> str:
-    if not BAIDU_AK:
-        return "周边搜索服务未配置(缺少百度地图 AK),暂时无法使用。"
-    keyword = (keyword or "").strip() or "美食"
-    d, _note = _resolve_device(device_id)
-    if d is None:
-        return "平台当前没有任何设备接入,无法确定搜索中心位置。"
-
-    origin = _origin_of(d)
-    if origin is None:
-        return "当前查不到车辆位置(GPS 长时间未定位),无法搜索周边。"
-
-    from tracker.geo import wgs84_to_bd09
-
-    lon_bd, lat_bd = wgs84_to_bd09(origin["lon"], origin["lat"])
-    pois = _poi_nearby(keyword, lat_bd, lon_bd, radius_m=max(200, min(radius_m, 5000)))
-    if not pois:
-        return f"附近 {radius_m} 米内没搜到「{keyword}」,可以换个关键词或扩大范围再试。"
-
-    lines = [f"附近的「{keyword}」找到 {len(pois)} 家(按距离从近到远):"]
-    for poi in pois:
-        seg = poi["name"]
-        if poi.get("distance_m") is not None:
-            seg += f",{poi['distance_m']}米"
-        if poi.get("rating"):
-            seg += f",评分{poi['rating']}"
-        if poi.get("price"):
-            seg += f",人均{float(poi['price']):.0f}元"
-        lines.append(seg)
-    return "\n".join(lines)
-
-
-@mcp.tool(
     name="get_track_summary",
     description=(
         "统计某辆车一段时间的行驶摘要:总里程、移动时长、平均/最高速度、起点和终点地址。"
@@ -593,8 +487,8 @@ def get_track_summary(
 @mcp.tool(
     name="list_vehicle_events",
     description=(
-        "查询安全事件记录:摔车、急刹车、颠簸路段、长时间停驻,每条都带发生地点(街道地址)。"
-        "用户问'今天有没有摔车/在哪摔的/急刹了几次/有什么异常'时用这个。"
+        "查询安全事件记录:摔车、超速两类,每条都带发生地点(街道地址)。"
+        "用户问'今天有没有摔车/在哪摔的/有没有超速/有什么异常'时用这个。"
         "device_id 不填=查所有设备;时间不填默认今天。"
     ),
 )
@@ -619,12 +513,13 @@ def list_vehicle_events(
         try:
             data = _get(d["_api"], f"/api/devices/{d['device_id']}/events",
                         start=start, end=end, limit=100)
-            all_events += [(d, e) for e in data.get("events", [])]
+            # 双保险过滤:只保留摔车/超速(采集端旧库可能残留其他类型)
+            all_events += [(d, e) for e in data.get("events", []) if e["type"] in EVENT_NAMES]
         except Exception as exc:
             logger.warning("事件查询失败 %s: %s", d["device_id"], exc)
     if not all_events:
         scope = f"设备 {device_id}" if device_id.strip() else "所有设备"
-        return f"{scope}在 {start} ~ {end} 没有安全事件记录,一切正常。"
+        return f"{scope}在 {start} ~ {end} 没有摔车或超速记录,一切正常。"
 
     all_events.sort(key=lambda x: x[1].get("start_time") or "", reverse=True)
     counter: dict[str, int] = {}
@@ -640,62 +535,14 @@ def list_vehicle_events(
         extra = ""
         if e["type"] in ("fall", "fall_suspect") and det.get("direction"):
             extra = f",向{det['direction']}侧倒"
-        elif e["type"] == "hard_brake" and det.get("from_kmh") is not None:
-            extra = f",从 {det['from_kmh']:.0f} 刹到 {det['to_kmh']:.0f}km/h"
-        elif e["type"] == "stop_long" and det.get("duration_s"):
-            extra = f",停了 {det['duration_s'] // 60} 分钟"
+        elif e["type"] == "overspeed" and det.get("max_kmh") is not None:
+            limit = det.get("limit_kmh")
+            extra = f",最高 {det['max_kmh']:.0f}km/h" + (f"(限速 {limit:.0f})" if limit else "")
         addr = _event_addr(det)
         where = f",地点:{addr}" if addr else ""
         lines.append(f"{e['start_time']} 设备 {d['device_id']}:{name}{extra}{where}")
     if len(all_events) > 10:
         lines.append(f"(仅列出最近 10 条,其余 {len(all_events) - 10} 条略)")
-    return "\n".join(lines)
-
-
-@mcp.tool(
-    name="get_fleet_overview",
-    description=(
-        "车队今日总览:每台设备的在线状态、今日行驶里程、今日各类安全事件次数。"
-        "用户问'今天车队整体情况/都正常吗'时用这个,一次调用拿到全貌。"
-    ),
-)
-def get_fleet_overview() -> str:
-    devices = _visible_devices()
-    if not devices:
-        return "平台当前没有任何设备接入。"
-    start = _today_start().strftime("%Y-%m-%d %H:%M:%S")
-    end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    lines = [f"今日车队总览(共 {len(devices)} 台,在线 {sum(1 for d in devices if d.get('online'))} 台):"]
-    for d in devices:
-        # 里程
-        km_text = "无移动"
-        try:
-            data = _get(d["_api"], f"/api/devices/{d['device_id']}/track",
-                        start=start, end=end, limit=50000)
-            pts = data.get("points", [])
-            if len(pts) >= 2:
-                dist = sum(
-                    _dist_m(a["lat"], a["lon"], b["lat"], b["lon"])
-                    for a, b in zip(pts, pts[1:])
-                )
-                km_text = f"行驶 {dist / 1000:.1f}km"
-        except Exception:
-            km_text = "里程查询失败"
-        # 事件
-        ev_text = "无事件"
-        try:
-            evs = _get(d["_api"], f"/api/devices/{d['device_id']}/events",
-                       start=start, end=end, limit=200).get("events", [])
-            if evs:
-                counter: dict[str, int] = {}
-                for e in evs:
-                    name = EVENT_NAMES.get(e["type"], e["type"])
-                    counter[name] = counter.get(name, 0) + 1
-                ev_text = "、".join(f"{n}{c}次" for n, c in counter.items())
-        except Exception:
-            ev_text = "事件查询失败"
-        state = "在线" if d.get("online") else "离线"
-        lines.append(f"设备 {d['device_id']}【{d['_hw']}】{state},今日{km_text},{ev_text}")
     return "\n".join(lines)
 
 

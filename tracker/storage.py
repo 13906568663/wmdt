@@ -287,8 +287,10 @@ class Storage:
         end: str | None = None,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
-        # void=换装仲裁作废;stop_short=历史遗留的短停(现已不再生成,一并隐藏)
-        sql = "SELECT * FROM events WHERE device_id = ? AND type NOT IN ('void', 'stop_short')"
+        # 展示白名单:对外只暴露摔车与超速(产品定位聚焦安全事件);
+        # 急刹/颠簸/停驻等仍照常入库积累数据,只是不再对外展示。
+        sql = ("SELECT * FROM events WHERE device_id = ?"
+               " AND type IN ('fall', 'fall_suspect', 'overspeed')")
         args: list[Any] = [device_id]
         if since_id:
             sql += " AND id > ?"

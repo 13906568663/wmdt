@@ -208,10 +208,7 @@ function appendPoints(points, { fit = false } = {}) {
 const EVENT_META = {
   fall: "摔车",
   fall_suspect: "疑似摔车",
-  hard_brake: "急刹车",
-  bump: "颠簸路段",
-  stop_short: "短暂停留",
-  stop_long: "长时驻留",
+  overspeed: "超速",
 };
 
 function eventDesc(e) {
@@ -220,14 +217,9 @@ function eventDesc(e) {
   if (e.type === "fall" || e.type === "fall_suspect") {
     if (d.direction && d.direction !== "不明") parts.push(`向${d.direction}倒`);
     if (d.tilt_max != null) parts.push(`倾角${d.tilt_max}°`);
-  } else if (e.type === "hard_brake") {
-    parts.push(`${d.from_kmh} → ${d.to_kmh} km/h`);
-  } else if (e.type === "bump") {
-    if (d.std_g != null) parts.push(`振动 ${d.std_g}g`);
-  } else if (d.duration_s != null) {
-    const m = Math.floor(d.duration_s / 60), s = d.duration_s % 60;
-    parts.push(m ? `${m}分${s}秒` : `${s}秒`);
-    if (d.ongoing) parts.push("进行中");
+  } else if (e.type === "overspeed") {
+    if (d.max_kmh != null) parts.push(`最高 ${d.max_kmh} km/h`);
+    if (d.limit_kmh != null) parts.push(`限速 ${d.limit_kmh}`);
   }
   return parts.join(" · ");
 }
@@ -270,7 +262,7 @@ async function refreshEvents(range) {
   } catch (e) { /* 下轮再试 */ }
 }
 
-/* ── 事件红点图层(摔车/急刹上图) ── */
+/* ── 事件红点图层(摔车红点 / 超速橙点上图) ── */
 
 let eventDots = {};  // event_id -> overlay
 
@@ -280,7 +272,7 @@ function renderEventDots(events) {
   for (const e of events.slice(0, 10)) {
     const d = e.detail || {};
     if (!d.lon_bd || !d.lat_bd) continue;
-    if (!["fall", "fall_suspect", "hard_brake"].includes(e.type)) continue;
+    if (!["fall", "fall_suspect", "overspeed"].includes(e.type)) continue;
     wanted[e.id] = e;
   }
   // 移除消失的
@@ -291,7 +283,7 @@ function renderEventDots(events) {
   for (const [id, e] of Object.entries(wanted)) {
     if (eventDots[id]) continue;
     const d = e.detail;
-    const icon = e.type === "hard_brake" ? BRAKE_ICON : FALL_ICON;
+    const icon = e.type === "overspeed" ? BRAKE_ICON : FALL_ICON;
     const m = new BMapGL.Marker(new BMapGL.Point(d.lon_bd, d.lat_bd), { icon });
     m.setTitle(`${EVENT_META[e.type] || e.type} ${e.start_time || ""}`);
     map.addOverlay(m);
