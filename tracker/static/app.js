@@ -1,13 +1,11 @@
-/* 车辆轨迹监控前端:百度地图 GL + 轮询式实时跟踪/历史轨迹 + 派单订单图层 */
+/* 车辆轨迹监控前端:百度地图 GL + 轮询式实时跟踪 + 派单订单图层
+   (历史轨迹查询已下线:GPS 静止漂移会画成满屏乱线,不给客户看) */
 
 const $ = (s) => document.querySelector(s);
 
 let map = null;
 let marker = null;
-let polyline = null;
-let trackPath = [];          // BMapGL.Point 数组
 let currentDevice = null;
-let mode = "live";           // live | history
 let lastPointId = 0;
 let liveTimer = null;
 let deviceTimer = null;
@@ -147,16 +145,14 @@ window.selectDevice = function (deviceId) {
   resetTrack();
   renderEvents([]);
   refreshDevices();
-  if (mode === "live") startLive();
+  startLive();
 };
 
-/* ── 轨迹绘制 ── */
+/* ── 轨迹绘制(只动骑手图标,不画轨迹线) ── */
 
 function resetTrack() {
-  if (polyline) { map.removeOverlay(polyline); polyline = null; }
   if (marker) { map.removeOverlay(marker); marker = null; }
   for (const id of Object.keys(eventDots)) { map.removeOverlay(eventDots[id]); delete eventDots[id]; }
-  trackPath = [];
   lastPointId = 0;
   $("#trackStats").textContent = "";
 }
@@ -169,23 +165,6 @@ function appendPoints(points, { fit = false } = {}) {
   const last = points[points.length - 1];
   const pos = new BMapGL.Point(last.lon_bd, last.lat_bd);
 
-  // 轨迹线只在"历史轨迹"模式画;实时页只动骑手图标,保持画面干净
-  if (mode === "history") {
-    for (const p of points) {
-      trackPath.push(new BMapGL.Point(p.lon_bd, p.lat_bd));
-    }
-    if (!polyline) {
-      polyline = new BMapGL.Polyline(trackPath, {
-        strokeColor: "#ff5000",
-        strokeWeight: 5,
-        strokeOpacity: 0.85,
-      });
-      map.addOverlay(polyline);
-    } else {
-      polyline.setPath(trackPath);
-    }
-  }
-
   if (!marker) {
     marker = riderMarker(pos);
   } else {
@@ -193,14 +172,9 @@ function appendPoints(points, { fit = false } = {}) {
   }
   updateTelemetry(last);
 
-  if (mode === "history") {
-    if (fit && trackPath.length > 1) map.setViewport(trackPath);
-    $("#trackStats").textContent = `轨迹点:${trackPath.length} · 最新:${last.gps_time}`;
-  } else {
-    if (fit) map.centerAndZoom(pos, 16);
-    else if ($("#followSwitch").checked) map.panTo(pos);
-    $("#trackStats").textContent = `最新上报:${last.gps_time}`;
-  }
+  if (fit) map.centerAndZoom(pos, 16);
+  else if ($("#followSwitch").checked) map.panTo(pos);
+  $("#trackStats").textContent = `最新上报:${last.gps_time}`;
 }
 
 /* ── 事件面板 ── */
@@ -318,7 +292,7 @@ async function startLive() {
   try {
     const latest = await api(`/devices/${currentDevice}/latest`);
     // 回填窗口只取最近 3 分钟:静止时 GPS 室内漂移会积累成满屏乱线,
-    // 窗口越短开场越干净;更早的轨迹用"历史轨迹"页查
+    // 窗口越短开场越干净
     const toLocal = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 19).replace("T", " ");
     const start = toLocal(new Date(Date.now() - 3 * 60 * 1000));
     const data = await api(`/devices/${currentDevice}/track?start=${encodeURIComponent(start)}`);
@@ -338,7 +312,7 @@ async function startLive() {
     /* 设备还没有数据,等轮询 */
   }
   liveTimer = setInterval(async () => {
-    if (!currentDevice || mode !== "live") return;
+    if (!currentDevice) return;
     try {
       const data = await api(`/devices/${currentDevice}/track?since_id=${lastPointId}`);
       appendPoints(data.points);
@@ -358,59 +332,12 @@ async function startLive() {
     } catch (e) { /* 网络抖动,下轮再试 */ }
   }, 1000);
   refreshEvents();
-  evtTimer = setInterval(() => { if (mode === "live") refreshEvents(); }, 5000);
+  evtTimer = setInterval(refreshEvents, 5000);
 }
 
 function stopLive() {
   if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
   if (evtTimer) { clearInterval(evtTimer); evtTimer = null; }
-}
-
-/* ── 历史模式 ── */
-
-async function queryHistory() {
-  if (!currentDevice) return alert("请先在左侧选择设备");
-  const start = $("#histStart").value.replace("T", " ");
-  const end = $("#histEnd").value.replace("T", " ");
-  if (!start || !end) return alert("请选择开始和结束时间");
-  resetTrack();
-  const params = new URLSearchParams({ start, end, limit: "50000" });
-  const data = await api(`/devices/${currentDevice}/track?${params}`);
-  refreshEvents({ start, end });
-  if (!data.count) {
-    $("#trackStats").textContent = "该时间段没有轨迹数据";
-    return;
-  }
-  appendPoints(data.points, { fit: true });
-  const first = data.points[0];
-  const startMarker = new BMapGL.Marker(new BMapGL.Point(first.lon_bd, first.lat_bd));
-  map.addOverlay(startMarker);
-}
-
-/* ── 模式切换 ── */
-
-$("#tabLive").onclick = () => switchMode("live");
-$("#tabHistory").onclick = () => switchMode("history");
-$("#btnQuery").onclick = queryHistory;
-
-function switchMode(m) {
-  mode = m;
-  $("#tabLive").classList.toggle("active", m === "live");
-  $("#tabHistory").classList.toggle("active", m === "history");
-  $("#liveBox").style.display = m === "live" ? "block" : "none";
-  $("#historyBox").style.display = m === "history" ? "flex" : "none";
-  if (m === "live") {
-    startLive();
-  } else {
-    stopLive();
-    resetTrack();
-    // 默认查最近一小时
-    const now = new Date();
-    const ago = new Date(now.getTime() - 3600 * 1000);
-    const toLocal = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 19);
-    $("#histEnd").value = toLocal(now);
-    $("#histStart").value = toLocal(ago);
-  }
 }
 
 /* ── 派单订单图层:店铺/买家标记 + 侧栏卡片(路线规划交给平台地图,不画连线) ── */
