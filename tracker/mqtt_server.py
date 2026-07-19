@@ -92,6 +92,7 @@ class MQTTServer:
         self._conns: set[_Conn] = set()
         self._rawlog = RawLogger(DB_DIR / "raw", prefix="mqtt")
         self._detector = EventDetector(storage)
+        self._tz_fixed: set[str] = set()  # 已提示过时钟校正的设备(只记日志一次)
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(self._handle_conn, self.host, self.port)
@@ -283,6 +284,15 @@ class MQTTServer:
         ts = float(data.get("ts") or time.time())
         if ts > 1e12:  # 毫秒兼容
             ts /= 1000
+        # 部分刹车盒固件把北京时间当 UTC 秒上报,ts 比实际快 8 小时,
+        # 服务端 localtime 再 +8 就成了"未来时间"。按接收时刻自动校正:
+        # 偏差落在 8h±1h 窗口内才减 8(时钟正常的设备不受影响,固件修复后自动失效)。
+        skew = ts - time.time()
+        if 7 * 3600 <= skew <= 9 * 3600:
+            ts -= 8 * 3600
+            if dev not in self._tz_fixed:
+                self._tz_fixed.add(dev)
+                logger.info("MQTT 设备 %s 上报时间快 %.1f 小时,已自动 -8h 校正", dev, skew / 3600)
         lat = float(data.get("latitude") or 0)
         lon = float(data.get("longitude") or 0)
         point: dict[str, Any] = {
