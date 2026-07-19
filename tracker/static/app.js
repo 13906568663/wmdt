@@ -128,7 +128,7 @@ async function refreshDevices() {
         <div class="device-id"><span class="dot ${d.online ? "on" : "off"}"></span>${d.device_id}
           <span class="proto-tag">${proto}</span></div>
         <div class="device-meta">
-          <span>${d.speed != null ? d.speed + " km/h" : "-"}</span>
+          <span>${d.speed != null ? Math.round(d.speed) + " km/h" : "-"}</span>
           <span>${time}</span>
           <span>${d.point_count} 点</span>
         </div>
@@ -294,7 +294,8 @@ function renderEventDots(events) {
 function updateTelemetry(p) {
   $("#telemetry").style.display = "block";
   $("#teleTime").textContent = p.gps_time + (p.located ? "" : " (未定位)");
-  $("#tSpeed").textContent = p.speed;
+  // MQTT 盒子 GPS 车速是长尾浮点,显示取整(JT808 本就 0.1 精度,取整同样合适)
+  $("#tSpeed").textContent = p.speed != null ? Math.round(p.speed) : "-";
   $("#tDirection").textContent = p.direction + "°";
   // 设备上报的陀螺/加速度是浮点原始值,尾数很长;显示层统一收敛:
   // 陀螺仪保留 1 位小数,加速度取整(mG)。存储与事件判定仍用原始精度。

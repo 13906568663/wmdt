@@ -300,7 +300,8 @@ class MQTTServer:
             "lat": round(lat, 6),
             "lon": round(lon, 6),
             "altitude": int(data.get("height") or 0),
-            "speed": float(data.get("spdGPS") or 0),
+            # GPS 速度原值是长尾浮点(2.574280023574829),入库收敛到 0.1 精度
+            "speed": round(float(data.get("spdGPS") or 0), 1),
             "direction": int(data.get("direction") or 0),
             "acc_on": bool(data.get("acc") or 0),
             "located": bool(data.get("gpsStatus") or 0),
