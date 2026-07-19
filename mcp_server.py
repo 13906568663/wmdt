@@ -8,8 +8,8 @@
     TRACKER_JT808_API   JT808 实例地址,默认 http://wmdt:18209
     TRACKER_MQTT_API    MQTT 实例地址,默认 http://wmdt-mqtt:18209
     MCP_PORT            监听端口,默认 18210
-    BAIDU_SERVER_AK     百度地图服务端 AK(逆地理门牌级 + POI 检索 + 骑行路线);
-                        留空则逆地理走 OSM、路线规划不可用
+    BAIDU_SERVER_AK     百度地图服务端 AK(逆地理门牌级 + POI 检索);
+                        留空则逆地理走 OSM
     BAIDU_REGION        POI 检索限定城市,默认 深圳
 
 启动:python mcp_server.py  →  MCP 接入点 http://<host>:18210/mcp(streamable-http)
@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 import math
 import os
-import re
 import threading
 import time
 from datetime import datetime, timedelta
@@ -41,17 +40,14 @@ MCP_PORT = int(os.getenv("MCP_PORT", "18210"))
 # 锁定单一设备:设置后所有工具只查这台车,忽略入参 device_id,不再要求用户/客户选择。
 # 留空则保持多设备行为。
 FIXED_DEVICE = os.getenv("TRACKER_FIXED_DEVICE", "").strip()
-# 百度地图服务端 AK:有则逆地理走百度(门牌级)、启用 plan_route 路线规划;无则退回 OSM。
+# 百度地图服务端 AK:有则逆地理走百度(门牌级)、启用周边检索;无则退回 OSM。
 BAIDU_AK = os.getenv("BAIDU_SERVER_AK", "").strip()
 BAIDU_REGION = os.getenv("BAIDU_REGION", "深圳").strip()
 # ── 演示模式 ──
-# DEMO_ORIGIN(WGS84 "lon,lat"):设备完全无定位时,位置/路线/周边以此固定起点兜底,
+# DEMO_ORIGIN(WGS84 "lon,lat"):设备完全无定位时,位置/周边以此固定起点兜底,
 # 保证演示环节(骑手起点固定)不因 GPS 未锁定而翻车;留空关闭。
 DEMO_ORIGIN = os.getenv("DEMO_ORIGIN", "").strip()
 DEMO_ORIGIN_NAME = os.getenv("DEMO_ORIGIN_NAME", "梦想小镇互联网村").strip()
-# DEMO_SCRIPT=1:plan_route 对固定演示目的地返回写死的"老司机"路线话术(内容恒定),
-# 其他目的地仍走百度实时规划。
-DEMO_SCRIPT = os.getenv("DEMO_SCRIPT", "0").strip() == "1"
 
 _DEVICE_ARG_DESC = (
     f"设备号;系统已锁定为 {FIXED_DEVICE},不填即可"
@@ -71,8 +67,8 @@ INSTRUCTIONS = (
     "外卖平台车辆数据查询。平台接入两类硬件:车机(JT808 协议)和智能刹车盒(MQTT 协议),"
     "都上报 GPS 轨迹与陀螺仪数据,服务端实时判定摔车/急刹车/颠簸/长时间停驻事件。"
     "可查:车辆列表与在线状态、某辆车当前位置(含街道地址)、时间段轨迹摘要(里程/时长/速度)、"
-    "安全事件记录;并支持从车辆当前位置出发的骑行路线规划(距离/耗时/转弯指引)"
-    "和周边地点搜索(美食/餐馆/药店等,带距离评分人均)。"
+    "安全事件记录;并支持周边地点搜索(美食/餐馆/药店等,带距离评分人均)。"
+    "路线规划不由本服务提供(平台地图自动规划,按平台路线走即可)。"
     "设备号即车辆标识,用户说'车'、'骑手'、'设备'都指它。"
 )
 
@@ -301,72 +297,9 @@ def _event_addr(detail: dict[str, Any]) -> str:
 
 
 # ──────────────────────────────────────────────────────────────
-# 百度 POI 检索 + 骑行路线规划(plan_route 用)
+# 百度 POI 周边检索(find_nearby 用)与演示起点兜底
+# 路线规划已下线:平台地图自动规划,尾程决策由派单系统的骑手情报承担。
 # ──────────────────────────────────────────────────────────────
-
-
-def _poi_search(query: str) -> dict[str, Any] | None:
-    """百度地点检索:目的地名称 → {name, address, lat_bd, lon_bd};找不到返回 None。"""
-    r = _http.get(
-        "https://api.map.baidu.com/place/v2/search",
-        params={"ak": BAIDU_AK, "output": "json", "query": query,
-                "region": BAIDU_REGION, "city_limit": "true", "page_size": 1},
-        timeout=8,
-    )
-    d = r.json()
-    if d.get("status") != 0 or not d.get("results"):
-        return None
-    top = d["results"][0]
-    loc = top.get("location") or {}
-    if not loc.get("lat"):
-        return None
-    return {"name": top.get("name", query), "address": top.get("address", ""),
-            "lat_bd": loc["lat"], "lon_bd": loc["lng"]}
-
-
-_TAG_RE = re.compile(r"<[^>]+>")
-
-
-# ──────────────────────────────────────────────────────────────
-# 演示剧本:固定目的地 → 写死的"老骑手"路线话术(内容恒定,不走实时规划)
-# 距离/路名基于演示起点(梦想小镇互联网村)的百度真实骑行规划结果。
-# ──────────────────────────────────────────────────────────────
-
-_DEMO_ROUTES: list[tuple[tuple[str, ...], str]] = [
-    (
-        ("敕勒川", "砂锅", "牛腩", "牛杂"),
-        "敕勒川砂锅牛腩牛杂煲就在你旁边,梦想小镇互联网村1号楼一楼,过去不到一分钟。"
-        "老骑手提示:园区里面限速,人多的时候推车走反而更快;商户已出货,到店报单号直接取餐。",
-    ),
-    (
-        ("鸡公煲", "万通"),
-        "到重庆鸡公煲杭师大店约1.8公里,骑行8分钟:出园区走仓兴街,右转上良睦路辅路,"
-        "转东莲街骑450米,时尚万通城1幢沿街就到。"
-        "老骑手提示:东莲街路窄注意会车;店门口禁停,车停马路对面非机动车位,取餐更快。",
-    ),
-    (
-        ("正元", "智慧", "邵"),
-        "送到正元智慧A栋约3.2公里,骑行14分钟:出园区走仓兴街,右转良睦路辅路,"
-        "沿余杭塘路直行1.3公里,到舒心路口进正元智慧大厦。"
-        "老骑手提示:送A幢13层,大堂登记走货梯,高峰期电梯慢,预留三分钟;收货人邵先生,尾号6147。",
-    ),
-    (
-        ("科技园", "杭师大", "D幢", "D305", "张"),
-        "送到杭州师范大学科技园D幢约3.9公里,骑行16分钟:出园区走仓兴街,右转良睦路辅路,"
-        "沿余杭塘路辅路直行1.8公里,到龙潭路左转,从科技园北门进,D幢在园区里侧。"
-        "老骑手提示:顾客备注放D305门口就行,不用打电话;北门保安问就说送外卖到D幢。",
-    ),
-]
-
-
-def _demo_route_text(destination: str) -> str | None:
-    """DEMO_SCRIPT 开启时,固定目的地命中剧本直接返回写死话术。"""
-    if not DEMO_SCRIPT:
-        return None
-    for keys, text in _DEMO_ROUTES:
-        if any(k in destination for k in keys):
-            return text
-    return None
 
 
 def _demo_origin_point() -> dict[str, Any] | None:
@@ -418,29 +351,6 @@ def _poi_nearby(query: str, lat_bd: float, lon_bd: float, radius_m: int = 1500) 
             "price": det.get("price"),
         })
     return out
-
-
-def _riding_route(o_lat_bd: float, o_lon_bd: float, d_lat_bd: float, d_lon_bd: float) -> dict[str, Any] | None:
-    """百度骑行路线规划(电动车模式,BD09 坐标);失败返回 None。"""
-    r = _http.get(
-        "https://api.map.baidu.com/direction/v2/riding",
-        params={"ak": BAIDU_AK, "riding_type": 1,
-                "origin": f"{o_lat_bd},{o_lon_bd}",
-                "destination": f"{d_lat_bd},{d_lon_bd}"},
-        timeout=12,
-    )
-    d = r.json()
-    routes = (d.get("result") or {}).get("routes") or []
-    if d.get("status") != 0 or not routes:
-        logger.warning("百度骑行规划失败 status=%s %s", d.get("status"), d.get("message"))
-        return None
-    route = routes[0]
-    steps = []
-    for s in route.get("steps", []):
-        text = _TAG_RE.sub("", s.get("instructions") or s.get("instruction") or "").strip()
-        if text:
-            steps.append(text)
-    return {"distance_m": route.get("distance", 0), "duration_s": route.get("duration", 0), "steps": steps}
 
 
 # ──────────────────────────────────────────────────────────────
@@ -582,60 +492,6 @@ def get_vehicle_location(
     return (
         f"设备 {device_id}【{d['_hw']}】{state}。当前 GPS 信号弱、暂未定位;"
         f"最近一次定位在:{addr}(定位时间 {last['gps_time']},约 {ago})。{note}"
-    )
-
-
-@mcp.tool(
-    name="plan_route",
-    description=(
-        "路线规划:从车辆当前位置骑行去某个目的地,返回距离、预计耗时和关键转弯指引。"
-        "用户问'去XX怎么走/到XX多远/骑过去要多久'时用这个。"
-        "destination 填目的地名称(如'西乡地铁站'、'沃尔玛蛇口店'),不用带城市名。"
-    ),
-)
-def plan_route(
-    destination: Annotated[str, Field(description="目的地名称或地址,如 西乡地铁站")],
-    device_id: Annotated[str, Field(description=_DEVICE_ARG_DESC)] = "",
-) -> str:
-    if not BAIDU_AK:
-        return "路线规划服务未配置(缺少百度地图 AK),暂时无法使用。"
-    destination = (destination or "").strip()
-    if not destination:
-        return "请告诉我目的地名称,比如'时尚万通城'。"
-    # 演示剧本:固定目的地返回恒定话术(含老骑手提示),不走实时规划
-    scripted = _demo_route_text(destination)
-    if scripted is not None:
-        return scripted
-    d, _note = _resolve_device(device_id)
-    if d is None:
-        return "平台当前没有任何设备接入,无法确定出发位置。"
-
-    origin = _origin_of(d)
-    if origin is None:
-        return "当前查不到车辆位置(GPS 长时间未定位),无法规划路线。"
-
-    poi = _poi_search(destination)
-    if poi is None:
-        return f"没有找到目的地「{destination}」,换个更具体的名称试试(如带上商圈或街道名)。"
-
-    from tracker.geo import wgs84_to_bd09
-
-    o_lon_bd, o_lat_bd = wgs84_to_bd09(origin["lon"], origin["lat"])
-    route = _riding_route(o_lat_bd, o_lon_bd, poi["lat_bd"], poi["lon_bd"])
-    if route is None:
-        return f"到「{poi['name']}」的骑行路线规划失败,稍后再试。"
-
-    km = route["distance_m"] / 1000
-    mins = max(1, round(route["duration_s"] / 60))
-    # 语音场景只报前几个关键动作,不逐条念完
-    steps = route["steps"][:4]
-    step_text = ";".join(steps)
-    if len(route["steps"]) > 4:
-        step_text += ";之后按导航继续"
-    dest_text = poi["name"] + (f"({poi['address']})" if poi.get("address") else "")
-    return (
-        f"从当前位置到{dest_text}:骑行约 {km:.1f} 公里,预计 {mins} 分钟。"
-        f"路线:{step_text}。"
     )
 
 

@@ -420,11 +420,10 @@ function switchMode(m) {
   }
 }
 
-/* ── 派单订单图层:店铺/买家标记 + 在途订单连线 + 侧栏卡片 ── */
+/* ── 派单订单图层:店铺/买家标记 + 侧栏卡片(路线规划交给平台地图,不画连线) ── */
 
 const ORDER_COLORS = { PENDING: "#94949e", ACCEPTED: "#f97316", DELIVERING: "#2563eb", DELIVERED: "#16a34a" };
 let poiMarkers = {};    // key -> {marker, label}
-let orderLines = {};    // order_id -> polyline
 let orderTimer = null;
 
 function startOrders() {
@@ -473,115 +472,7 @@ async function refreshOrders() {
     poiMarkers[key] = { marker: m, label };
   }
 
-  // 2) 在途订单连线:起点永远是骑手(设备)。
-  //    取餐段(骑手→未取店铺)橙色;送餐段(最后取货点→买家,全取完后骑手→买家)绿色。
-  const riderPos = marker ? marker.getPosition() : null;
-  const PICK_COLOR = "#f97316", DELIVER_COLOR = "#16a34a";
-  const wantedLines = {};  // key: orderId -> [{pts, color}, ...]
-  for (const o of active) {
-    if (o.status === "PENDING" || !riderPos) continue; // 未接的单只亮标记,不拉线
-    const segs = [];
-    const unpicked = [];
-    for (const p of o.pickups) {
-      if (p.status === "PICKED") continue;
-      const shop = (state.shops || []).find((s) => s.id === p.shop_id);
-      if (shop && shop.lng) unpicked.push(new BMapGL.Point(shop.lng, shop.lat));
-    }
-    const b = (state.buyers || []).find((x) => x.id === o.buyer.id);
-    const buyerPt = b && b.lng ? new BMapGL.Point(b.lng, b.lat) : null;
-    if (unpicked.length) {
-      segs.push({ pts: [riderPos, ...unpicked], color: PICK_COLOR });
-      if (buyerPt) segs.push({ pts: [unpicked[unpicked.length - 1], buyerPt], color: DELIVER_COLOR });
-    } else if (buyerPt) {
-      segs.push({ pts: [riderPos, buyerPt], color: DELIVER_COLOR });
-    }
-    if (segs.length) wantedLines[o.id] = segs;
-  }
-  for (const id of Object.keys(orderLines)) {
-    if (!wantedLines[id]) {
-      for (const l of orderLines[id]) map.removeOverlay(l);
-      delete orderLines[id];
-    }
-  }
-  for (const [id, segs] of Object.entries(wantedLines)) {
-    const lines = orderLines[id] || [];
-    // 段数或样式变化时整组重建,简单可靠
-    let rebuild = lines.length !== segs.length;
-    if (!rebuild) {
-      for (let i = 0; i < segs.length; i++) {
-        const { routed } = buildRoutedPath(segs[i].pts);
-        if (lines[i].__routed !== routed || lines[i].__color !== segs[i].color) { rebuild = true; break; }
-      }
-    }
-    if (rebuild) {
-      for (const l of lines) map.removeOverlay(l);
-      orderLines[id] = segs.map((seg) => {
-        const { path, routed } = buildRoutedPath(seg.pts);
-        const style = routed
-          ? { strokeColor: seg.color, strokeWeight: 5, strokeOpacity: 0.85, strokeStyle: "solid" }
-          : { strokeColor: seg.color, strokeWeight: 3, strokeOpacity: 0.75, strokeStyle: "dashed" };
-        const line = new BMapGL.Polyline(path, style);
-        line.__routed = routed;
-        line.__color = seg.color;
-        map.addOverlay(line);
-        return line;
-      });
-    } else {
-      for (let i = 0; i < segs.length; i++) {
-        const { path } = buildRoutedPath(segs[i].pts);
-        lines[i].setPath(path);
-      }
-    }
-  }
-
   renderOrderCards(active, state);
-}
-
-/* ── 真实骑行路线:分段调百度路线规划,端点量化缓存,失败回退直线虚线 ── */
-
-const _routeCache = {};    // "a|b" -> Point[](null = 规划失败,用直线)
-const _routePending = {};  // 防止同段并发重复请求
-
-function _q(p) { return p.lng.toFixed(4) + "," + p.lat.toFixed(4); } // ~10m 网格
-
-function _requestRoute(a, b) {
-  const key = _q(a) + "|" + _q(b);
-  if (key in _routeCache || _routePending[key]) return;
-  const Svc = BMapGL.RidingRoute || BMapGL.WalkingRoute;
-  if (!Svc) { _routeCache[key] = null; return; }
-  _routePending[key] = true;
-  // 缓存无限增长保护(演示场景端点有限,骑手移动会产生新格子)
-  if (Object.keys(_routeCache).length > 300) for (const k of Object.keys(_routeCache)) delete _routeCache[k];
-  const svc = new Svc(map, {
-    onSearchComplete: (res) => {
-      delete _routePending[key];
-      try {
-        const plan = res && res.getPlan ? res.getPlan(0) : null;
-        const route = plan && plan.getRoute ? plan.getRoute(0) : null;
-        const path = route && route.getPath ? route.getPath() : null;
-        _routeCache[key] = path && path.length > 1 ? path : null;
-      } catch (e) { _routeCache[key] = null; }
-    },
-  });
-  try { svc.search(a, b); } catch (e) { delete _routePending[key]; _routeCache[key] = null; }
-}
-
-function buildRoutedPath(pts) {
-  // 逐段取缓存的真实路线;缺的段先用直线顶着并异步请求,下轮刷新自然替换
-  let full = [];
-  let routedAll = true;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const key = _q(pts[i]) + "|" + _q(pts[i + 1]);
-    const seg = _routeCache[key];
-    if (seg && seg.length > 1) {
-      full = full.concat(seg);
-    } else {
-      if (!(key in _routeCache)) _requestRoute(pts[i], pts[i + 1]);
-      full.push(pts[i], pts[i + 1]);
-      routedAll = false;
-    }
-  }
-  return { path: full, routed: routedAll };
 }
 
 function renderOrderCards(active, state) {
