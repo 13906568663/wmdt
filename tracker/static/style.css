@@ -19,6 +19,8 @@ body {
   gap: 10px;
   overflow-y: auto;
 }
+/* 区块不许被 flex 压扁:内容多时整栏滚动,而不是把下面的区块挤没 */
+.sidebar > * { flex-shrink: 0; }
 .brand { display: flex; gap: 10px; align-items: center; }
 .brand-logo {
   background: linear-gradient(120deg, #ff5000, #ff9a4d);
@@ -33,7 +35,7 @@ body {
 .section-title { font-weight: 700; margin-top: 8px; font-size: 13px; }
 .muted { color: #a5a5ad; font-weight: 400; font-size: 12px; }
 
-.device-list { display: flex; flex-direction: column; gap: 8px; }
+.device-list { display: flex; flex-direction: column; gap: 8px; max-height: 264px; overflow-y: auto; }
 .device-card {
   border: 1px solid #eceef2;
   border-radius: 10px;
